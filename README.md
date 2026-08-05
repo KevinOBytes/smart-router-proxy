@@ -2,7 +2,7 @@
 
 An OpenAI-compatible proxy server with task-aware model routing. Any OpenAI SDK client points at this proxy, requests the virtual model `smart-router`, and each session is classified (local Gemma via Ollama) and routed to the optimal upstream model on OpenRouter.
 
-This is the standalone-server counterpart to the [hermes-smart-router](https://github.com/KevinOBytes/hermes-smart-router) Hermes plugin — same classifier, route table, and alias mappings (imported from that package), exposed as infrastructure instead of a plugin. Use the plugin inside Hermes Agent; use this proxy for everything else (SDKs, IDEs, LangChain, curl).
+This is the standalone-server counterpart to the [hermes-smart-router](https://github.com/KevinOBytes/hermes-smart-router) Hermes plugin — same routing logic (vendored, not imported), exposed as an OpenAI-compatible endpoint with zero dependency on the plugin package. Point any OpenAI SDK client, agent, or curl at it and request the virtual model `smart-router`; each session is classified (local Gemma via Ollama, deterministic regex first) and routed to the optimal upstream model on OpenRouter.
 
 ```
 ┌────────────┐   POST /v1/chat/completions    ┌───────────────────┐
@@ -16,6 +16,14 @@ This is the standalone-server counterpart to the [hermes-smart-router](https://g
                                               │ model: z-ai/glm-5.2│
                                               └───────────────────┘
 ```
+
+## Selected-model visibility
+
+Every routed response shows which model actually answered, in both transports:
+
+- **Non-streaming**: `content` is prefixed with `[alias :: model]` — e.g. `[luna :: openai/gpt-5.6-luna]\nOK` — and the response's `model` field carries the routed slug.
+- **Streaming**: the first SSE chunk carries the note as the assistant delta prefix, followed by `: OPENROUTER PROCESSING` keepalives from the upstream.
+- Requests that name a real model directly (no routing) pass through untouched — no annotation.
 
 ## Endpoints
 

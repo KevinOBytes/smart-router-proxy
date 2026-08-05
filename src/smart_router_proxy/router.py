@@ -14,14 +14,14 @@ import time
 from typing import Any
 
 import httpx
-from hermes_smart_router.deterministic import classify_deterministic
-from hermes_smart_router.models import (
+
+from smart_router_proxy.config import ProxyConfig
+from smart_router_proxy.deterministic import classify_deterministic
+from smart_router_proxy.models import (
     DEFAULT_ALIAS_MAPPINGS,
     DEFAULT_ROUTE_TABLE,
     ClassifierResult,
 )
-
-from smart_router_proxy.config import ProxyConfig
 from smart_router_proxy.store import Store, hash_key
 
 logger = logging.getLogger(__name__)

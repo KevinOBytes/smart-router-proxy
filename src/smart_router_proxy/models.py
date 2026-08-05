@@ -1,0 +1,257 @@
+"""Domain models, enums, and contracts for the smart-router plugin."""
+
+from __future__ import annotations
+
+import enum
+
+from pydantic import BaseModel, Field, field_validator
+
+# ── Enums ──────────────────────────────────────────────────────────────
+
+
+class TaskClass(enum.StrEnum):
+    """The eight allowed task classifications from Gemma."""
+
+    STRUCTURED_SIMPLE = "structured_simple"
+    AGENTIC_EXECUTION = "agentic_execution"
+    SOFTWARE_ENGINEERING = "software_engineering"
+    SECURITY_ENGINEERING = "security_engineering"
+    KNOWLEDGE_REASONING = "knowledge_reasoning"
+    WRITING_COMMUNICATION = "writing_communication"
+    COMPUTER_USE = "computer_use"
+    VISUAL_FRONTEND = "visual_frontend"
+
+
+class RiskLevel(enum.StrEnum):
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class Sensitivity(enum.StrEnum):
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+
+class OperatingMode(enum.StrEnum):
+    SHADOW = "shadow"
+    ACTIVE = "active"
+    FIXED = "fixed"
+
+
+class ReasonCode(enum.StrEnum):
+    """Reason codes for route selection and escalation."""
+
+    CLASSIFIER = "classifier"
+    DETERMINISTIC = "deterministic"
+    CLASSIFIER_FALLBACK = "classifier_fallback"
+    ESCALATION_FAILURE = "escalation_failure"
+    ESCALATION_TOOL_LOOP = "escalation_tool_loop"
+    ESCALATION_COMMAND_FAILURE = "escalation_command_failure"
+    ESCALATION_BUILD_FAILURE = "escalation_build_failure"
+    ESCALATION_SCHEMA_FAILURE = "escalation_schema_failure"
+    ESCALATION_CONTEXT_OVERFLOW = "escalation_context_overflow"
+    ESCALATION_HIGH_RISK = "escalation_high_risk"
+    ESCALATION_VALIDATOR = "escalation_validator"
+    FIXED_MODE = "fixed_mode"
+    SHADOW_MODE = "shadow_mode"
+
+
+class EventType(enum.StrEnum):
+    CLASSIFICATION = "classification"
+    DETERMINISTIC_OVERRIDE = "deterministic_override"
+    CLASSIFIER_FALLBACK = "classifier_fallback"
+    ROUTE_SELECTED = "route_selected"
+    MODEL_PINNED = "model_pinned"
+    PROVIDER_REQUEST = "provider_request"
+    PROVIDER_FAILURE = "provider_failure"
+    ESCALATION = "escalation"
+    SENSITIVITY_WARNING = "sensitivity_warning"
+    SENSITIVITY_BLOCK = "sensitivity_block"
+    TASK_COMPLETED = "task_completed"
+    TASK_CANCELLED = "task_cancelled"
+    TASK_EXPIRED = "task_expired"
+
+
+# ── Schemas ────────────────────────────────────────────────────────────
+
+
+class ClassifierResult(BaseModel):
+    """Strictly validated output from the Gemma classifier.
+
+    Gemma must never return a provider, model alias, model slug, endpoint,
+    or credential. Every field is enum-constrained. Extra fields are rejected
+    to prevent prompt injection via task text.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    task_class: TaskClass
+    risk: RiskLevel
+    sensitivity: Sensitivity
+    requires_tools: bool = True
+    requires_vision: bool = False
+    long_context: bool = False
+    destructive_potential: bool = False
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("confidence")
+    @classmethod
+    def confidence_range(cls, v: float) -> float:
+        if v < 0.0 or v > 1.0:
+            msg = f"Confidence must be between 0 and 1, got {v}"
+            raise ValueError(msg)
+        return v
+
+
+class RouteSelection(BaseModel):
+    """The result of policy evaluation: which alias to use and why."""
+
+    primary_alias: str
+    escalation_alias: str
+    reason_code: ReasonCode
+    task_class: TaskClass
+    risk: RiskLevel
+    sensitivity: Sensitivity
+    confidence: float = 0.0
+    classifier_raw: ClassifierResult | None = None
+
+
+class ModelPin(BaseModel):
+    """A pinned concrete model for a task session."""
+
+    alias: str
+    concrete_model: str
+    provider: str = "openrouter"
+    base_url: str = "https://openrouter.ai/api/v1"
+
+
+class EscalationDecision(BaseModel):
+    """Result of an escalation check."""
+
+    should_escalate: bool
+    reason_code: ReasonCode | None = None
+    detail: str = ""
+
+
+class TelemetryEvent(BaseModel):
+    """Content-free structured event for observability."""
+
+    event_type: EventType
+    task_id: str | None = None
+    session_id: str | None = None
+    primary_alias: str | None = None
+    escalation_alias: str | None = None
+    concrete_model: str | None = None
+    reason_code: ReasonCode | None = None
+    latency_ms: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    estimated_cost: float | None = None
+    detail: str = ""
+
+
+class HealthStatus(BaseModel):
+    """Health check result for a component."""
+
+    name: str
+    healthy: bool
+    detail: str = ""
+
+
+class AliasMapping(BaseModel):
+    """Mapping from a logical alias to a concrete OpenRouter model slug."""
+
+    alias: str
+    model_slug: str
+    requires_tools: bool = True
+    requires_vision: bool = False
+    supports_audio: bool = False
+    """Whether the model supports audio input/output (TTS/STT)."""
+    fallback_slug: str | None = None
+    """Optional fallback when the primary slug is unavailable (e.g. fable->opus)."""
+
+
+# ── Constants ──────────────────────────────────────────────────────────
+
+
+DEFAULT_ROUTE_TABLE: dict[TaskClass, tuple[str, str]] = {
+    TaskClass.STRUCTURED_SIMPLE: ("luna", "glm"),
+    TaskClass.AGENTIC_EXECUTION: ("deepseek_flash", "sol"),
+    TaskClass.SOFTWARE_ENGINEERING: ("glm", "opus"),
+    TaskClass.SECURITY_ENGINEERING: ("sol", "fable"),
+    TaskClass.KNOWLEDGE_REASONING: ("glm", "kimi_k3"),
+    TaskClass.WRITING_COMMUNICATION: ("sonnet", "opus"),
+    TaskClass.COMPUTER_USE: ("sonnet", "opus"),
+    TaskClass.VISUAL_FRONTEND: ("kimi_k3", "opus"),
+}
+
+DEFAULT_ALIAS_MAPPINGS: dict[str, AliasMapping] = {
+    "luna": AliasMapping(
+        alias="luna",
+        model_slug="openai/gpt-5.6-luna",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=True,
+    ),
+    "deepseek_flash": AliasMapping(
+        alias="deepseek_flash",
+        model_slug="deepseek/deepseek-v4-flash-0731",
+        requires_tools=True,
+        requires_vision=False,
+        supports_audio=False,
+    ),
+    "glm": AliasMapping(
+        alias="glm",
+        model_slug="z-ai/glm-5.2",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=False,
+    ),
+    "sol": AliasMapping(
+        alias="sol",
+        model_slug="openai/gpt-5.6-sol",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=True,
+    ),
+    "sonnet": AliasMapping(
+        alias="sonnet",
+        model_slug="anthropic/claude-sonnet-5",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=False,
+    ),
+    "opus": AliasMapping(
+        alias="opus",
+        model_slug="anthropic/claude-opus-5",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=False,
+    ),
+    "fable": AliasMapping(
+        alias="fable",
+        model_slug="anthropic/claude-fable-5",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=False,
+        fallback_slug="anthropic/claude-opus-5",
+    ),
+    "kimi_k3": AliasMapping(
+        alias="kimi_k3",
+        model_slug="moonshotai/kimi-k3",
+        requires_tools=True,
+        requires_vision=True,
+        supports_audio=False,
+    ),
+    "kimi_code": AliasMapping(
+        alias="kimi_code",
+        model_slug="moonshotai/kimi-k2.7-code",
+        requires_tools=True,
+        requires_vision=False,
+        supports_audio=False,
+    ),
+}

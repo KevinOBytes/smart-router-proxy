@@ -139,6 +139,15 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         except Exception as exc:
             logger.debug("usage recording failed: %s", exc)
 
+    def _annotate_content(content: str, model: str, alias: str) -> str:
+        """Prepend a visible 'selected model' note to assistant content.
+
+        The response body's ``model`` field is rewritten to the routed slug
+        already (client-visible via API), but humans reading plain text also
+        need to see which model answered.
+        """
+        return f"[{alias} :: {model}]\n{content}"
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Any:
         _check_client_auth(request)
@@ -157,9 +166,11 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
 
         # Route only the virtual model; pass real model names through untouched.
         routed_alias = "-"
+        routed_slug = ""
         if requested_model in (cfg.virtual_model, f"tko/{cfg.virtual_model}"):
             text = extract_user_text(messages)
             slug, routed_alias = await router.route(text, session_key)
+            routed_slug = slug
             body["model"] = slug
             # OpenRouter sticky routing: pin this conversation to the same
             # upstream backend so provider-side prompt caches keep hitting.
@@ -203,6 +214,16 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 started=started,
                 status=resp.status_code,
             )
+            if routed_alias != "-":
+                try:
+                    msg = payload.get("choices", [{}])[0].get("message") or {}
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        msg["content"] = _annotate_content(
+                            content, routed_slug, routed_alias
+                        )
+                except Exception as exc:
+                    logger.debug("content annotation failed: %s", exc)
             return JSONResponse(payload, status_code=resp.status_code)
 
         # Streaming: ask the upstream to append a final usage chunk so the
@@ -216,12 +237,39 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         async def stream_upstream() -> AsyncIterator[bytes]:
             status = 0
             buffer = b""
+            first = True
             async with http.stream(
                 "POST", "/chat/completions", json=body, headers=headers
             ) as upstream:
                 status = upstream.status_code
                 async for chunk in upstream.aiter_bytes():
                     buffer = (buffer + chunk)[-16384:]  # tail only, for usage
+                    if first and routed_alias != "-" and status == 200:
+                        first = False
+                        try:
+                            note = json.dumps(
+                                {
+                                    "id": "chatcmpl-route-note",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": routed_slug,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "role": "assistant",
+                                                "content": (
+                                                    f"[{routed_alias} :: {routed_slug}]\n"
+                                                ),
+                                            },
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                            )
+                            yield f"data: {note}\n\n".encode()
+                        except Exception as exc:
+                            logger.debug("stream annotation failed: %s", exc)
                     yield chunk
             # Parse the final SSE data lines for the usage-bearing chunk.
             usage_payload: dict[str, Any] = {}
