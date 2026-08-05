@@ -66,6 +66,33 @@ class TestRouting:
         slug2, alias2 = await router.route("now say hello", session_key="s1")
         assert (slug1, alias1) == (slug2, alias2)
 
+    async def test_session_pin_ttl_slides_on_hit(self) -> None:
+        """Active conversations must never re-route (cache-cost protection).
+
+        Each pin hit refreshes pinned_at, so a conversation that stays active
+        past the TTL keeps its model — a mid-stream model switch would
+        invalidate the provider's cached prompt prefix and re-bill the full
+        context at uncached rates.
+        """
+        import time as _time
+
+        cfg = ProxyConfig(session_ttl_seconds=3600)
+        r = Router(cfg)
+        slug1, alias1 = await r.route(
+            "Fix the failing pytest suite in my repo", session_key="s-slide"
+        )
+        # Simulate a pin created 59 minutes ago (1 min before expiry).
+        with r._lock:
+            s, a, _ = r._pins["s-slide"]
+            r._pins["s-slide"] = (s, a, _time.time() - 3540)
+        # A hit at minute 59 must refresh pinned_at to now, not keep the
+        # original timestamp.
+        slug2, alias2 = await r.route("continue please", session_key="s-slide")
+        assert (slug2, alias2) == (slug1, alias1)
+        with r._lock:
+            _, _, refreshed_at = r._pins["s-slide"]
+        assert _time.time() - refreshed_at < 5
+
     async def test_fixed_mode(self) -> None:
         cfg = ProxyConfig(mode="fixed", fixed_alias="sonnet")
         r = Router(cfg)

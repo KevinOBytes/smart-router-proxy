@@ -60,10 +60,15 @@ class Router:
         if cfg.mode == "fixed":
             return self._resolve_alias(cfg.fixed_alias), cfg.fixed_alias
 
+        # Session pin: sliding TTL — every hit refreshes the pin so an active
+        # conversation never re-routes mid-stream. A mid-conversation model
+        # switch invalidates the provider's cached prompt prefix (cache-read
+        # discounts are per-model) and re-bills the full context uncached.
         if session_key:
             with self._lock:
                 pin = self._pins.get(session_key)
                 if pin and (time.time() - pin[2]) < cfg.session_ttl_seconds:
+                    self._pins[session_key] = (pin[0], pin[1], time.time())
                     return pin[0], pin[1]
 
         alias = await self._classify_alias(text)

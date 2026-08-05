@@ -128,6 +128,12 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             text = extract_user_text(messages)
             slug, routed_alias = await router.route(text, session_key)
             body["model"] = slug
+            # OpenRouter sticky routing: pin this conversation to the same
+            # upstream backend so provider-side prompt caches keep hitting.
+            # Without this, requests can bounce between backends and every
+            # bounce re-bills the full prefix at uncached input rates.
+            if session_key and "session_id" not in body:
+                body["session_id"] = session_key
             logger.info(
                 "routed request_id=%s alias=%s model=%s",
                 uuid.uuid4().hex[:8],
