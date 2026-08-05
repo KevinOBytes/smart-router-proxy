@@ -11,21 +11,10 @@ server:
   client_auth_env: SMART_ROUTER_PROXY_TOKEN
 
 # Local BERT classifier (distilbert + MLX, ~5-15ms, ~87% accuracy).
-# Model auto-downloads to ~/.smart-router-proxy/classifier-model/ on first use.
-# Requires: pip install mlx transformers torch
+# Model must be trained from github.com/KevinOBytes/prompt-classifier and
+# copied to model_path. Without it, the proxy falls back to luna.
 classifier:
   model_path: ~/.smart-router-proxy/classifier-model
-  confidence_threshold: 0.45
-
-# Local Ollama classifier (Gemma LLM fallback — disabled by default).
-# Enable only if you want LLM-based classification as a third tier.
-ollama:
-  enabled: false
-  model: gemma4:31b
-  base_url: http://127.0.0.1:11434
-  timeout_seconds: 30
-  temperature: 0.0
-  max_output_tokens: 512
   confidence_threshold: 0.45
 
 # Upstream OpenAI-compatible API.

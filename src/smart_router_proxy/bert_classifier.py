@@ -1,7 +1,7 @@
 """BERT prompt classifier — fast local intent detection.
 
-Sits between deterministic rules and Gemma LLM classification.
 Loads the trained distilbert + MLX head model once and caches it.
+Falls back gracefully if the model isn't available.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ CATEGORY_SENSITIVITY: dict[str, Sensitivity] = {
 CATEGORY_DESTRUCTIVE: set[str] = {"security_threat"}
 
 # ── Confidence threshold ───────────────────────────────────────────────
-# Below this, defer to Gemma
+# Below this, fall back to luna
 CONFIDENCE_THRESHOLD = 0.45
 
 

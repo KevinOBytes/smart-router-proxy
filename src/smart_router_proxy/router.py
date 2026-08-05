@@ -1,23 +1,18 @@
 """Request router: classify → alias → concrete model slug.
 
-Reuses the hermes-smart-router package for the deterministic classifier,
-route table, and alias mappings so proxy and plugin stay in lockstep.
+Reuses the hermes-smart-router package for the route table and alias
+mappings so proxy and plugin stay in lockstep.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 import threading
 import time
 from typing import Any
 
-import httpx
-
 from smart_router_proxy.bert_classifier import get_classifier
 from smart_router_proxy.config import ProxyConfig
-from smart_router_proxy.deterministic import classify_deterministic
 from smart_router_proxy.models import (
     DEFAULT_ALIAS_MAPPINGS,
     DEFAULT_ROUTE_TABLE,
@@ -28,20 +23,6 @@ from smart_router_proxy.store import Store, hash_key
 logger = logging.getLogger(__name__)
 
 FALLBACK_ALIAS = "luna"
-
-_CLASSIFICATION_PROMPT = (
-    "Classify this request into exactly one category.\n\n"
-    "Categories: structured_simple, agentic_execution, software_engineering, "
-    "security_engineering, knowledge_reasoning, writing_communication, "
-    "computer_use, visual_frontend\n\n"
-    "Return ONLY valid JSON:\n"
-    '{"task_class": "<category>", "risk": "low|moderate|high|critical", '
-    '"sensitivity": "public|internal|confidential|restricted", '
-    '"confidence": 0.0-1.0}\n\n'
-    "Request:"
-)
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 class Router:
@@ -119,12 +100,7 @@ class Router:
         if not text:
             return FALLBACK_ALIAS
 
-        # Tier 1: deterministic rules (fast, high precision)
-        result = classify_deterministic(text, None)
-        if result is not None:
-            return self._apply_route(result)
-
-        # Tier 2: BERT classifier (fast, ~5-15ms, good coverage)
+        # BERT classifier (fast, ~5-15ms)
         try:
             bert = get_classifier()
             result = bert.classify_to_result(text)
@@ -133,18 +109,11 @@ class Router:
         except Exception as exc:
             logger.debug("BERT classifier unavailable: %s", exc)
 
-        # Tier 3: Gemma LLM (slow, expensive — disabled by default)
-        # Enable by setting config.ollama.enabled = True
-        if self._config.ollama.enabled:
-            result = await self._classify_gemma(text)
-            if result is not None:
-                return self._apply_route(result)
-
         return FALLBACK_ALIAS
 
     def _apply_route(self, result: ClassifierResult) -> str:
         """Map a ClassifierResult to an alias via the route table."""
-        if result.confidence < self._config.ollama.confidence_threshold:
+        if result.confidence < self._config.classifier.confidence_threshold:
             return FALLBACK_ALIAS
 
         route = DEFAULT_ROUTE_TABLE.get(result.task_class)
@@ -153,40 +122,6 @@ class Router:
         if result.risk.value in ("high", "critical"):
             return str(route[1])
         return str(route[0])
-
-    async def _classify_gemma(self, text: str) -> ClassifierResult | None:
-        o = self._config.ollama
-        try:
-            async with httpx.AsyncClient(timeout=o.timeout_seconds) as client:
-                resp = await client.post(
-                    f"{o.base_url.rstrip('/')}/api/generate",
-                    json={
-                        "model": o.model,
-                        "prompt": f"{_CLASSIFICATION_PROMPT} {text[:4000]}",
-                        "stream": False,
-                        "options": {
-                            "temperature": o.temperature,
-                            "num_predict": o.max_output_tokens,
-                        },
-                    },
-                )
-                resp.raise_for_status()
-                raw = str(resp.json().get("response", "")).strip()
-        except Exception as exc:
-            logger.debug("gemma classification unavailable: %s", exc)
-            return None
-
-        if not raw:
-            return None
-        fence = _JSON_FENCE_RE.search(raw)
-        if fence:
-            raw = fence.group(1)
-        try:
-            data: Any = json.loads(raw)
-            return ClassifierResult.model_validate(data)
-        except Exception as exc:
-            logger.debug("gemma returned unparseable classification: %s", exc)
-            return None
 
     def _resolve_alias(self, alias: str) -> str:
         overrides = self._config.aliases

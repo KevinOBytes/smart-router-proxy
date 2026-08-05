@@ -15,16 +15,10 @@ import yaml
 from pydantic import BaseModel, Field
 
 
-class OllamaSettings(BaseModel):
-    """Local Ollama classifier settings."""
+class ClassifierSettings(BaseModel):
+    """Local BERT classifier settings."""
 
-    enabled: bool = False
-    """Set True to enable Gemma LLM classification (disabled by default)."""
-    model: str = "gemma4:31b"
-    base_url: str = "http://127.0.0.1:11434"
-    timeout_seconds: float = 30.0
-    temperature: float = 0.0
-    max_output_tokens: int = 512
+    model_path: str = "~/.smart-router-proxy/classifier-model"
     confidence_threshold: float = 0.45
 
 
@@ -57,7 +51,7 @@ class ProxyConfig(BaseModel):
     """Full proxy configuration."""
 
     server: ServerSettings = Field(default_factory=ServerSettings)
-    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+    classifier: ClassifierSettings = Field(default_factory=ClassifierSettings)
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     # Virtual model name the proxy exposes.
     virtual_model: str = "smart-router"

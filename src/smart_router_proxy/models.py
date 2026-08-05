@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TaskClass(enum.StrEnum):
-    """The eight allowed task classifications from Gemma."""
+    """The eight allowed task classifications."""
 
     STRUCTURED_SIMPLE = "structured_simple"
     AGENTIC_EXECUTION = "agentic_execution"
@@ -80,9 +80,9 @@ class EventType(enum.StrEnum):
 
 
 class ClassifierResult(BaseModel):
-    """Strictly validated output from the Gemma classifier.
+    """Strictly validated output from the classifier.
 
-    Gemma must never return a provider, model alias, model slug, endpoint,
+    Must never return a provider, model alias, model slug, endpoint,
     or credential. Every field is enum-constrained. Extra fields are rejected
     to prevent prompt injection via task text.
     """

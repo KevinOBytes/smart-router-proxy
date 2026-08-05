@@ -3,9 +3,7 @@
 An OpenAI-compatible proxy server with task-aware model routing. Any OpenAI SDK client points at this proxy, requests the virtual model `smart-router`, and each request is classified and routed to the optimal upstream model on OpenRouter.
 
 **Classification pipeline:**
-1. **Deterministic** — tool-name check for computer_use (fast, no model needed)
-2. **BERT classifier** — local distilbert + MLX model (~5-15ms, ~87% accuracy)
-3. **Gemma LLM** — optional, disabled by default (set `ollama.enabled: true`)
+1. **BERT classifier** — local distilbert + MLX model (~5-15ms, ~87% accuracy)
 
 This is the standalone-server counterpart to the [hermes-smart-router](https://github.com/KevinOBytes/hermes-smart-router) Hermes plugin — same routing logic, exposed as an OpenAI-compatible endpoint.
 
@@ -18,9 +16,14 @@ pip install smart-router-proxy
 # Set your OpenRouter key
 export OPENROUTER_API_KEY="sk-or-v1-..."
 
-# Run (downloads classifier model on first use)
+# Run
 smart-router-proxy
 ```
+
+> **Note:** The BERT classifier model is not auto-downloaded. Train it from
+> [prompt-classifier](https://github.com/KevinOBytes/prompt-classifier) or copy
+> the trained `model/` directory to `~/.smart-router-proxy/classifier-model/`.
+> Without it, the proxy falls back to `luna`.
 
 The proxy listens on `http://127.0.0.1:8199`. Point any OpenAI client at it:
 

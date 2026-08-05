@@ -6,7 +6,7 @@ Endpoints:
   GET  /v1/models           — virtual model + upstream catalog passthrough
   GET  /v1/stats            — content-free usage/cost/cache-hit aggregates
   ANY  /v1/*                — generic passthrough (embeddings, completions, …)
-  GET  /healthz             — liveness + Ollama/upstream reachability
+  GET  /healthz             — liveness + upstream reachability
 
 The proxy never logs or stores prompt content or credentials — the ledger
 holds token counts, cost, latency, model names, and hashed session keys only.
@@ -77,11 +77,12 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     async def healthz() -> JSONResponse:
         checks: dict[str, Any] = {"server": True}
         try:
-            async with httpx.AsyncClient(timeout=3) as client:
-                r = await client.get(f"{cfg.ollama.base_url.rstrip('/')}/api/tags")
-                checks["ollama"] = r.status_code == 200
+            from smart_router_proxy.bert_classifier import get_classifier
+
+            bert = get_classifier()
+            checks["classifier"] = bert is not None
         except Exception:
-            checks["ollama"] = False
+            checks["classifier"] = False
         checks["upstream_key_set"] = bool(cfg.upstream.api_key)
         status = 200 if all(checks.values()) else 503
         return JSONResponse(checks, status_code=status)
