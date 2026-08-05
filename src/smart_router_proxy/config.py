@@ -66,6 +66,8 @@ class ProxyConfig(BaseModel):
     # mode: active | fixed
     mode: str = "active"
     fixed_alias: str = "luna"
+    # SQLite ledger (usage accounting + pin persistence). ":memory:" for tests.
+    store_path: str = "~/.smart-router-proxy/state.db"
 
 
 def load_config(path: str | Path | None = None) -> ProxyConfig:

@@ -21,9 +21,19 @@ This is the standalone-server counterpart to the [hermes-smart-router](https://g
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /v1/chat/completions` | Requests for the virtual model are classified and routed; real model names pass through untouched. Streaming and non-streaming. |
+| `POST /v1/chat/completions` | Requests for the virtual model are classified and routed; real model names pass through untouched. Streaming and non-streaming. One automatic retry on the alias's fallback model for upstream 429/5xx. |
 | `GET /v1/models` | Virtual model first, then the live upstream catalog. |
+| `GET /v1/stats` | Content-free usage aggregates: requests, tokens, cached tokens, cache-hit rate, cost, latency — totals, per-model, per-day. |
+| `ANY /v1/*` | Generic passthrough for other OpenAI-compatible endpoints (embeddings, legacy completions, moderations). No routing. |
 | `GET /healthz` | Liveness + Ollama reachability + upstream key presence. |
+
+## Usage accounting and cache cost visibility
+
+Every request writes a content-free row to a local SQLite ledger (`~/.smart-router-proxy/state.db`): timestamp, hashed session key, alias, model, prompt/completion/cached token counts, cost (from OpenRouter's usage block), latency, and status. Streamed requests are accounted too — the proxy sets `stream_options.include_usage` so the final chunk carries usage.
+
+`GET /v1/stats` returns the aggregates, including **cache_hit_rate** (cached ÷ prompt tokens) — if a change to your setup breaks provider-side prompt caching, it shows up here before it shows up on the bill. No prompt or completion content is ever stored or logged.
+
+Session pins are persisted in the same ledger, so a proxy restart does not re-route an active conversation (a restart-induced model switch would invalidate the provider's per-model cached prefix and re-bill the full context uncached).
 
 ## Routing
 

@@ -22,6 +22,7 @@ from hermes_smart_router.models import (
 )
 
 from smart_router_proxy.config import ProxyConfig
+from smart_router_proxy.store import Store, hash_key
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,15 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 class Router:
     """Classifies request text and resolves it to a concrete model slug."""
 
-    def __init__(self, config: ProxyConfig) -> None:
+    def __init__(self, config: ProxyConfig, store: Store | None = None) -> None:
         self._config = config
         self._lock = threading.Lock()
         # session key -> (slug, alias, pinned_at)
         self._pins: dict[str, tuple[str, str, float]] = {}
+        # Optional durable pin store — pins survive proxy restarts, so an
+        # active conversation keeps its routed model instead of being
+        # reclassified (and possibly model-switched) after a restart.
+        self._store = store
 
     async def route(
         self, text: str, session_key: str | None = None
@@ -65,24 +70,49 @@ class Router:
         # switch invalidates the provider's cached prompt prefix (cache-read
         # discounts are per-model) and re-bills the full context uncached.
         if session_key:
+            now = time.time()
             with self._lock:
                 pin = self._pins.get(session_key)
-                if pin and (time.time() - pin[2]) < cfg.session_ttl_seconds:
-                    self._pins[session_key] = (pin[0], pin[1], time.time())
+                if pin is None and self._store is not None:
+                    pin = self._store.get_pin(hash_key(session_key))
+                    if pin is not None:
+                        self._pins[session_key] = pin
+                if pin and (now - pin[2]) < cfg.session_ttl_seconds:
+                    refreshed = (pin[0], pin[1], now)
+                    self._pins[session_key] = refreshed
+                    if self._store is not None:
+                        self._store.save_pin(
+                            hash_key(session_key), pin[0], pin[1], now
+                        )
                     return pin[0], pin[1]
 
         alias = await self._classify_alias(text)
         slug = self._resolve_alias(alias)
 
         if session_key:
+            now = time.time()
             with self._lock:
                 if len(self._pins) > 1024:
-                    cutoff = time.time() - cfg.session_ttl_seconds
+                    cutoff = now - cfg.session_ttl_seconds
                     self._pins = {
                         k: v for k, v in self._pins.items() if v[2] >= cutoff
                     }
-                self._pins[session_key] = (slug, alias, time.time())
+                self._pins[session_key] = (slug, alias, now)
+            if self._store is not None:
+                self._store.save_pin(hash_key(session_key), slug, alias, now)
         return slug, alias
+
+    def fallback_slug(self, alias: str) -> str | None:
+        """Return the configured fallback slug for an alias, if any."""
+        overrides = self._config.aliases
+        if alias in overrides:
+            fb = overrides[alias].get("fallback_slug")
+            if fb:
+                return str(fb)
+        mapping = DEFAULT_ALIAS_MAPPINGS.get(alias)
+        if mapping is not None and mapping.fallback_slug:
+            return str(mapping.fallback_slug)
+        return None
 
     async def _classify_alias(self, text: str) -> str:
         if not text:

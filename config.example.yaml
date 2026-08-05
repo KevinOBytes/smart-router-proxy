@@ -38,6 +38,11 @@ fixed_alias: luna
 # header keep their routed model this long.
 session_ttl_seconds: 3600
 
+# SQLite ledger: content-free usage accounting + persistent session pins.
+# Holds token counts, cost, latency, model names, hashed session keys —
+# never prompt or completion content.
+store_path: ~/.smart-router-proxy/state.db
+
 # Optional alias -> slug overrides (defaults come from hermes-smart-router)
 aliases: {}
 #  luna:
