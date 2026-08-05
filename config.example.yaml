@@ -1,0 +1,44 @@
+# smart-router-proxy — Example Configuration
+#
+# Copy to config.yaml (gitignored) or point SMART_ROUTER_PROXY_CONFIG at it.
+# Secrets come from environment variables only — never put keys in this file.
+
+server:
+  host: 127.0.0.1
+  port: 8199
+  # Env var holding an optional bearer token clients must present.
+  # Leave the env var unset to disable client auth (localhost-only setups).
+  client_auth_env: SMART_ROUTER_PROXY_TOKEN
+
+# Local Ollama classifier (same tuning guidance as hermes-smart-router:
+# gemma4:31b needs ~20-25s on Apple Silicon; keep timeout at 30+).
+ollama:
+  model: gemma4:31b
+  base_url: http://127.0.0.1:11434
+  timeout_seconds: 30
+  temperature: 0.0
+  max_output_tokens: 512
+  confidence_threshold: 0.70
+
+# Upstream OpenAI-compatible API.
+upstream:
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  timeout_seconds: 600
+
+# The model name clients request to get routing. Any other model name
+# passes through to the upstream untouched.
+virtual_model: smart-router
+
+# mode: active (classify + route) or fixed (always fixed_alias)
+mode: active
+fixed_alias: luna
+
+# Session pin TTL — requests with the same `user` field or X-Session-Id
+# header keep their routed model this long.
+session_ttl_seconds: 3600
+
+# Optional alias -> slug overrides (defaults come from hermes-smart-router)
+aliases: {}
+#  luna:
+#    model_slug: openai/gpt-5.6-luna
