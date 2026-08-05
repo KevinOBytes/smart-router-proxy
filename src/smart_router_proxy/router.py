@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from smart_router_proxy.bert_classifier import get_classifier
 from smart_router_proxy.config import ProxyConfig
 from smart_router_proxy.deterministic import classify_deterministic
 from smart_router_proxy.models import (
@@ -118,12 +119,31 @@ class Router:
         if not text:
             return FALLBACK_ALIAS
 
+        # Tier 1: deterministic rules (fast, high precision)
         result = classify_deterministic(text, None)
-        if result is None:
-            result = await self._classify_gemma(text)
-        if result is None:
-            return FALLBACK_ALIAS
+        if result is not None:
+            return self._apply_route(result)
 
+        # Tier 2: BERT classifier (fast, ~5-15ms, good coverage)
+        try:
+            bert = get_classifier()
+            result = bert.classify_to_result(text)
+            if result is not None:
+                return self._apply_route(result)
+        except Exception as exc:
+            logger.debug("BERT classifier unavailable: %s", exc)
+
+        # Tier 3: Gemma LLM (slow, expensive — disabled by default)
+        # Enable by setting config.ollama.enabled = True
+        if self._config.ollama.enabled:
+            result = await self._classify_gemma(text)
+            if result is not None:
+                return self._apply_route(result)
+
+        return FALLBACK_ALIAS
+
+    def _apply_route(self, result: ClassifierResult) -> str:
+        """Map a ClassifierResult to an alias via the route table."""
         if result.confidence < self._config.ollama.confidence_threshold:
             return FALLBACK_ALIAS
 

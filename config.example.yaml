@@ -10,15 +10,23 @@ server:
   # Leave the env var unset to disable client auth (localhost-only setups).
   client_auth_env: SMART_ROUTER_PROXY_TOKEN
 
-# Local Ollama classifier (same tuning guidance as hermes-smart-router:
-# gemma4:31b needs ~20-25s on Apple Silicon; keep timeout at 30+).
+# Local BERT classifier (distilbert + MLX, ~5-15ms, ~87% accuracy).
+# Model auto-downloads to ~/.smart-router-proxy/classifier-model/ on first use.
+# Requires: pip install mlx transformers torch
+classifier:
+  model_path: ~/.smart-router-proxy/classifier-model
+  confidence_threshold: 0.45
+
+# Local Ollama classifier (Gemma LLM fallback — disabled by default).
+# Enable only if you want LLM-based classification as a third tier.
 ollama:
+  enabled: false
   model: gemma4:31b
   base_url: http://127.0.0.1:11434
   timeout_seconds: 30
   temperature: 0.0
   max_output_tokens: 512
-  confidence_threshold: 0.70
+  confidence_threshold: 0.45
 
 # Upstream OpenAI-compatible API.
 upstream:

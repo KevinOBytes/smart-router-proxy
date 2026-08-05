@@ -18,12 +18,14 @@ from pydantic import BaseModel, Field
 class OllamaSettings(BaseModel):
     """Local Ollama classifier settings."""
 
+    enabled: bool = False
+    """Set True to enable Gemma LLM classification (disabled by default)."""
     model: str = "gemma4:31b"
     base_url: str = "http://127.0.0.1:11434"
     timeout_seconds: float = 30.0
     temperature: float = 0.0
     max_output_tokens: int = 512
-    confidence_threshold: float = 0.70
+    confidence_threshold: float = 0.45
 
 
 class UpstreamSettings(BaseModel):
