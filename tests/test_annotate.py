@@ -106,6 +106,7 @@ def _install_mock(client: TestClient, stream: bool = False) -> None:
 
 @pytest.fixture()
 def app(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = ProxyConfig(annotate_response=True)
     app = create_app(cfg)
 
@@ -142,6 +143,68 @@ def test_nostream_annotation(app: TestClient) -> None:
     assert data["model"] == "z-ai/glm-5.2"
 
 
+def test_session_id_body_activates_pinning(app: TestClient) -> None:
+    calls: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content or b"{}")
+        calls.append(body)
+        return _fake_upstream_handler(request)
+
+    app.app.state.http = httpx.AsyncClient(  # type: ignore[union-attr]
+        base_url="http://test", transport=httpx.MockTransport(handler)
+    )
+    first = app.post(
+        "/v1/chat/completions",
+        json={
+            "model": "smart-router",
+            "session_id": "hermes-session-1",
+            "messages": [{"role": "user", "content": "write a python function"}],
+        },
+    )
+    second = app.post(
+        "/v1/chat/completions",
+        json={
+            "model": "smart-router",
+            "session_id": "hermes-session-1",
+            "messages": [{"role": "user", "content": "now explain a recipe"}],
+        },
+    )
+    assert first.status_code == second.status_code == 200
+    assert len(calls) == 2
+    assert calls[0]["model"] == calls[1]["model"] == "z-ai/glm-5.2"
+    assert calls[0]["session_id"] == calls[1]["session_id"] == "hermes-session-1"
+
+
+def test_routing_metadata_forwarded(app: TestClient) -> None:
+    captured: dict[str, object] = {}
+    captured_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content or b"{}"))
+        captured_headers.update(dict(request.headers))
+        return _fake_upstream_handler(request)
+
+    app.app.state.http = httpx.AsyncClient(  # type: ignore[union-attr]
+        base_url="http://test", transport=httpx.MockTransport(handler)
+    )
+    r = app.post(
+        "/v1/chat/completions",
+        json={
+            "model": "smart-router",
+            "messages": [{"role": "user", "content": "write a python function"}],
+        },
+    )
+    assert r.status_code == 200
+    assert captured["metadata"] == {
+        "task_class": "software_engineering",
+        "router_alias": "glm",
+        "router_slug": "z-ai/glm-5.2",
+    }
+    assert json.loads(captured_headers["langfuse_trace_metadata"]) == captured["metadata"]
+    assert captured_headers["langfuse_generation_name"] == "smart-router-proxy"
+
+
 def test_stream_annotation(app: TestClient) -> None:
     _install_mock(app, stream=True)
     r = app.post(
@@ -156,8 +219,9 @@ def test_stream_annotation(app: TestClient) -> None:
     assert "[software_engineering :: z-ai/glm-5.2 (glm)]" in r.text
 
 
-def test_disabled_default() -> None:
+def test_disabled_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default config (annotate_response=False) must pass through verbatim."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = ProxyConfig()  # annotate_response defaults False
     app = create_app(cfg)
     with TestClient(app) as client:

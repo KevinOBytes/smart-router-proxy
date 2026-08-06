@@ -95,8 +95,31 @@ class ClassifierHead(nn.Module):
         return self.net(x)
 
 
+def resolve_base_model(model_dir: str | Path, configured_base_model: str) -> tuple[str, bool]:
+    """Resolve a bundled base model, falling back to the pinned HF identifier.
+
+    Release bundles place the complete DistilBERT snapshot under
+    ``classifier-model/base_model``. When present, require both the config and
+    safetensors weights and force Transformers into local-only mode. Existing
+    developer installs without a bundle retain the legacy Hugging Face cache /
+    download path.
+    """
+    base_dir = Path(model_dir).expanduser() / "base_model"
+    config_path = base_dir / "config.json"
+    weights_path = base_dir / "model.safetensors"
+    if base_dir.exists():
+        missing = [str(path.name) for path in (config_path, weights_path) if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                f"Incomplete bundled base model at {base_dir}; missing: {', '.join(missing)}"
+            )
+        return str(base_dir), True
+    return configured_base_model, False
+
+
 # ── Singleton ──────────────────────────────────────────────────────────
 _classifier: BertClassifier | None = None
+
 
 
 def get_classifier() -> BertClassifier:
@@ -135,10 +158,13 @@ class BertClassifier:
         self.model.load_weights(weights_path)
         mx.eval(self.model.parameters())
 
-        # Cached HF feature extractor
+        # Cached HF feature extractor. Release installs bundle the exact base
+        # model beside the classifier head so production inference is offline
+        # and revision-stable. Developer installs retain the legacy HF fallback.
         from transformers import AutoModel
 
-        self.hf_model = AutoModel.from_pretrained(self.config["base_model"])
+        base_source, local_only = resolve_base_model(model_dir, self.config["base_model"])
+        self.hf_model = AutoModel.from_pretrained(base_source, local_files_only=local_only)
         self.hf_model.eval()
 
     def _extract_features(self, texts: list[str]) -> mx.array:

@@ -160,9 +160,15 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
 
         requested_model = str(body.get("model", ""))
         messages = body.get("messages") or []
+        # Hermes/OpenRouter provider profiles send the sticky key as a
+        # top-level ``session_id`` field. OpenAI clients may instead use
+        # ``user`` or an X-Session-Id header. Accept all supported forms so
+        # the proxy's per-session pin survives every transport path.
         session_key = (
-            str(body.get("user", ""))
+            str(body.get("session_id", ""))
+            or str(body.get("user", ""))
             or request.headers.get("x-session-id", "")
+            or request.headers.get("x-hermes-session-id", "")
             or None
         )
 
@@ -175,6 +181,15 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             slug, routed_alias, routed_category = await router.route(text, session_key)
             routed_slug = slug
             body["model"] = slug
+            # Inject classification metadata so downstream tracing (LiteLLM →
+            # Langfuse) records the routing decision in the trace.
+            existing_meta = body.get("metadata")
+            if not isinstance(existing_meta, dict):
+                existing_meta = {}
+            existing_meta.setdefault("task_class", routed_category)
+            existing_meta.setdefault("router_alias", routed_alias)
+            existing_meta.setdefault("router_slug", routed_slug)
+            body["metadata"] = existing_meta
             # OpenRouter sticky routing: pin this conversation to the same
             # upstream backend so provider-side prompt caches keep hitting.
             if session_key and "session_id" not in body:
@@ -188,6 +203,18 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             )
 
         headers = _upstream_headers()
+        if routed_alias != "-":
+            # LiteLLM's Langfuse callback reads trace metadata from these
+            # request headers. Keep LiteLLM as the sole Langfuse sender while
+            # preserving the classifier decision in its one trace.
+            headers["langfuse_trace_metadata"] = json.dumps(
+                {
+                    "task_class": routed_category,
+                    "router_alias": routed_alias,
+                    "router_slug": routed_slug,
+                }
+            )
+            headers["langfuse_generation_name"] = "smart-router-proxy"
         stream = bool(body.get("stream"))
         http: httpx.AsyncClient = request.app.state.http
         started = time.time()

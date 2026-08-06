@@ -5,11 +5,24 @@ from __future__ import annotations
 import pytest
 
 from smart_router_proxy.config import ProxyConfig
+from smart_router_proxy.models import ClassifierResult, RiskLevel, Sensitivity, TaskClass
 from smart_router_proxy.router import FALLBACK_ALIAS, Router, extract_user_text
 
 
 @pytest.fixture()
-def router() -> Router:
+def router(monkeypatch: pytest.MonkeyPatch) -> Router:
+    # Keep routing tests deterministic and independent of the installed model
+    # weights. Integration tests cover the real classifier separately.
+    fake_result = ClassifierResult(
+        task_class=TaskClass.SOFTWARE_ENGINEERING,
+        risk=RiskLevel.MODERATE,
+        sensitivity=Sensitivity.INTERNAL,
+        confidence=0.91,
+    )
+    monkeypatch.setattr(
+        "smart_router_proxy.router.get_classifier",
+        lambda: type("C", (), {"classify_to_result": lambda self, text: fake_result})(),
+    )
     return Router(ProxyConfig())
 
 

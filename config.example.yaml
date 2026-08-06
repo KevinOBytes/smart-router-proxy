@@ -11,8 +11,10 @@ server:
   client_auth_env: SMART_ROUTER_PROXY_TOKEN
 
 # Local BERT classifier (distilbert + MLX, ~5-15ms, ~87% accuracy).
-# Model must be trained from github.com/KevinOBytes/prompt-classifier and
-# copied to model_path. Without it, the proxy falls back to luna.
+# The complete model bundle (DistilBERT base + trained classifier head) is
+# downloaded and verified by ./install.sh from the pinned GitHub Release
+# asset listed in models/manifest.json. After install, inference is fully
+# offline — no Hugging Face download at runtime.
 classifier:
   model_path: ~/.smart-router-proxy/classifier-model
   confidence_threshold: 0.45

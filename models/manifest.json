@@ -1,0 +1,30 @@
+{
+  "classifier_version": "1.0.0",
+  "proxy_compatibility": ">=0.1.0,<0.2.0",
+  "platform": "darwin-arm64",
+  "archive": "smart-router-classifier-v1.0.0-darwin-arm64.tar.zst",
+  "primary_url": "https://github.com/KevinOBytes/smart-router-proxy/releases/download/classifier-v1.0.0/smart-router-classifier-v1.0.0-darwin-arm64.tar.zst",
+  "sha256": "09362690b19330002e77a969dfea5182dc33b058952d61909d18234f28cf36b9",
+  "size": 248048642,
+  "install_path": "~/.smart-router-proxy/classifier-model",
+  "base_model": "distilbert-base-uncased",
+  "base_model_revision": "12040accade4e8a0f71eabdb258fecc2e7e948be",
+  "accuracy": 0.871,
+  "confidence_threshold": 0.45,
+  "max_length": 64,
+  "num_classes": 10,
+  "labels": ["cli","coding","computer_use","data_analysis","general_knowledge","math","planning","roleplay","security_threat","writing_editing"],
+  "license": "MIT (classifier head); distilbert-base-uncased under Apache-2.0 (Hugging Face)",
+  "contents": {
+    "classifier_head": {
+      "config": "config.json",
+      "tokenizer": "tokenizer.json",
+      "tokenizer_config": "tokenizer_config.json",
+      "weights": "weights.safetensors"
+    },
+    "base_model": {
+      "dir": "base_model",
+      "files": ["config.json","model.safetensors","tokenizer.json","tokenizer_config.json","vocab.txt"]
+    }
+  }
+}

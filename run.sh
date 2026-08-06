@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Launch smart-router-proxy with OPENROUTER_API_KEY pulled from ~/.hermes/.env
+# Launch smart-router-proxy with its configured upstream key from ~/.hermes/.env.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-KEY="$(grep -E '^OPENROUTER_API_KEY=' "$HOME/.hermes/.env" | head -1 | cut -d= -f2- | tr -d '"')"
+# Parse api_key_env from config.yaml so changing the destination endpoint does
+# not require editing this launcher. Extract the value without sourcing the
+# dotenv file (it may contain unquoted multi-word values).
+KEY_ENV="$(.venv/bin/python3 - <<'PY'
+from smart_router_proxy.config import load_config
+print(load_config("config.yaml").upstream.api_key_env)
+PY
+)"
+KEY="$(grep -E "^${KEY_ENV}=" "$HOME/.hermes/.env" | head -1 | cut -d= -f2- | tr -d '"')"
 if [ -z "${KEY:-}" ]; then
-  echo "FATAL: OPENROUTER_API_KEY not found in ~/.hermes/.env" >&2
+  echo "FATAL: ${KEY_ENV} not found in ~/.hermes/.env" >&2
   exit 1
 fi
 
-export OPENROUTER_API_KEY="$KEY"
+export "${KEY_ENV}=${KEY}"
 
 # exec -a sets a clean process name so the proxy shows as "smart-router-proxy"
 # (not "bash" / "python3.13") in Activity Monitor / the macOS Background
