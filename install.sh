@@ -33,9 +33,9 @@ warn()  { echo "warn: $*" >&2; }
 # ── platform ─────────────────────────────────────────────────────────────
 check_platform() {
   local os arch
-  os="$(uname -s)"
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch="$(uname -m)"
-  if [ "$os" != "Darwin" ]; then
+  if [ "$os" != "darwin" ]; then
     fail "this build is macOS-only (detected $os). Build an ONNX bundle for other platforms."
   fi
   if [ "$arch" != "arm64" ]; then
@@ -109,7 +109,9 @@ download_model() {
   info "extracting to $MODEL_DIR"
   mkdir -p "$MODEL_DIR"
   rm -rf "${MODEL_DIR:?}"/*
-  tar --use-compress-program=zstd -xf "$tmp/$archive" -C "$MODEL_DIR"
+  # macOS bsdtar's --use-compress-program=zstd fails with a broken pipe
+  # (zstd error 70) on this host; decompress explicitly and pipe into tar.
+  zstd -dc "$tmp/$archive" | tar -xf - -C "$MODEL_DIR"
   # archive contains classifier-model/ — move contents up one level
   if [ -d "$MODEL_DIR/classifier-model" ]; then
     mv "$MODEL_DIR/classifier-model/"* "$MODEL_DIR/" 2>/dev/null || true
