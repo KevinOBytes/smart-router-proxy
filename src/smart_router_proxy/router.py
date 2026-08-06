@@ -31,8 +31,8 @@ class Router:
     def __init__(self, config: ProxyConfig, store: Store | None = None) -> None:
         self._config = config
         self._lock = threading.Lock()
-        # session key -> (slug, alias, pinned_at)
-        self._pins: dict[str, tuple[str, str, float]] = {}
+        # session key -> (slug, alias, category, pinned_at)
+        self._pins: dict[str, tuple[str, str, str, float]] = {}
         # Optional durable pin store — pins survive proxy restarts, so an
         # active conversation keeps its routed model instead of being
         # reclassified (and possibly model-switched) after a restart.
@@ -40,12 +40,16 @@ class Router:
 
     async def route(
         self, text: str, session_key: str | None = None
-    ) -> tuple[str, str]:
-        """Return (concrete_slug, alias) for the given request text."""
+    ) -> tuple[str, str, str]:
+        """Return (concrete_slug, alias, task_category) for the request text.
+
+        ``task_category`` is the classified TaskClass value (e.g. "software_engineering"),
+        or "-" when unknown (fixed mode, fallback, or empty text).
+        """
         cfg = self._config
 
         if cfg.mode == "fixed":
-            return self._resolve_alias(cfg.fixed_alias), cfg.fixed_alias
+            return self._resolve_alias(cfg.fixed_alias), cfg.fixed_alias, "-"
 
         # Session pin: sliding TTL — every hit refreshes the pin so an active
         # conversation never re-routes mid-stream. A mid-conversation model
@@ -59,16 +63,16 @@ class Router:
                     pin = self._store.get_pin(hash_key(session_key))
                     if pin is not None:
                         self._pins[session_key] = pin
-                if pin and (now - pin[2]) < cfg.session_ttl_seconds:
-                    refreshed = (pin[0], pin[1], now)
+                if pin and (now - pin[3]) < cfg.session_ttl_seconds:
+                    refreshed = (pin[0], pin[1], pin[2], now)
                     self._pins[session_key] = refreshed
                     if self._store is not None:
                         self._store.save_pin(
-                            hash_key(session_key), pin[0], pin[1], now
+                            hash_key(session_key), pin[0], pin[1], pin[2], now
                         )
-                    return pin[0], pin[1]
+                    return pin[0], pin[1], pin[2]
 
-        alias = await self._classify_alias(text)
+        alias, category = await self._classify_alias(text)
         slug = self._resolve_alias(alias)
 
         if session_key:
@@ -77,12 +81,12 @@ class Router:
                 if len(self._pins) > 1024:
                     cutoff = now - cfg.session_ttl_seconds
                     self._pins = {
-                        k: v for k, v in self._pins.items() if v[2] >= cutoff
+                        k: v for k, v in self._pins.items() if v[3] >= cutoff
                     }
-                self._pins[session_key] = (slug, alias, now)
+                self._pins[session_key] = (slug, alias, category, now)
             if self._store is not None:
-                self._store.save_pin(hash_key(session_key), slug, alias, now)
-        return slug, alias
+                self._store.save_pin(hash_key(session_key), slug, alias, category, now)
+        return slug, alias, category
 
     def fallback_slug(self, alias: str) -> str | None:
         """Return the configured fallback slug for an alias, if any."""
@@ -96,9 +100,10 @@ class Router:
             return str(mapping.fallback_slug)
         return None
 
-    async def _classify_alias(self, text: str) -> str:
+    async def _classify_alias(self, text: str) -> tuple[str, str]:
+        """Return (alias, task_category) for the given text."""
         if not text:
-            return FALLBACK_ALIAS
+            return FALLBACK_ALIAS, "-"
 
         # BERT classifier (fast, ~5-15ms)
         try:
@@ -109,19 +114,23 @@ class Router:
         except Exception as exc:
             logger.debug("BERT classifier unavailable: %s", exc)
 
-        return FALLBACK_ALIAS
+        return FALLBACK_ALIAS, "-"
 
-    def _apply_route(self, result: ClassifierResult) -> str:
-        """Map a ClassifierResult to an alias via the route table."""
+    def _apply_route(self, result: ClassifierResult) -> tuple[str, str]:
+        """Map a ClassifierResult to (alias, task_category).
+
+        Returns the escalation alias when risk is high/critical, else the
+        primary route alias. Category is the classified task class.
+        """
+        category = result.task_class.value
         if result.confidence < self._config.classifier.confidence_threshold:
-            return FALLBACK_ALIAS
-
+            return FALLBACK_ALIAS, category
         route = DEFAULT_ROUTE_TABLE.get(result.task_class)
         if route is None:
-            return FALLBACK_ALIAS
+            return FALLBACK_ALIAS, category
         if result.risk.value in ("high", "critical"):
-            return str(route[1])
-        return str(route[0])
+            return str(route[1]), category
+        return str(route[0]), category
 
     def _resolve_alias(self, alias: str) -> str:
         overrides = self._config.aliases

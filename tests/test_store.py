@@ -74,12 +74,13 @@ class TestStore:
     def test_pin_roundtrip_and_prune(self) -> None:
         s = Store(":memory:")
         kh = hash_key("session-1")
-        s.save_pin(kh, "z-ai/glm-5.2", "glm", time.time())
+        s.save_pin(kh, "z-ai/glm-5.2", "glm", "software_engineering", time.time())
         pin = s.get_pin(kh)
         assert pin is not None
         assert pin[0] == "z-ai/glm-5.2"
+        assert pin[2] == "software_engineering"
         # Stale pin gets pruned.
-        s.save_pin(hash_key("old"), "x", "y", time.time() - 99999)
+        s.save_pin(hash_key("old"), "x", "y", "-", time.time() - 99999)
         s.prune_pins(3600)
         assert s.get_pin(hash_key("old")) is None
         assert s.get_pin(kh) is not None
@@ -99,14 +100,14 @@ class TestPersistentPins:
         cfg = ProxyConfig()
 
         r1 = Router(cfg, store=store)
-        slug1, alias1 = await r1.route(
+        slug1, alias1, cat1 = await r1.route(
             "Fix the failing pytest suite in my repo", session_key="persist-1"
         )
 
         # Fresh Router simulating a proxy restart — same store, empty memory.
         r2 = Router(cfg, store=store)
-        slug2, alias2 = await r2.route("continue please", session_key="persist-1")
-        assert (slug2, alias2) == (slug1, alias1)
+        slug2, alias2, cat2 = await r2.route("continue please", session_key="persist-1")
+        assert (slug2, alias2, cat2) == (slug1, alias1, cat1)
         store.close()
 
 

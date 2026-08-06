@@ -83,9 +83,6 @@ upstream:
   base_url: "https://openrouter.ai/api/v1"
   api_key_env: "OPENROUTER_API_KEY"
 
-ollama:
-  enabled: false  # set true to enable Gemma LLM fallback
-
 mode: active  # or "fixed" to always use one model
 fixed_alias: "luna"
 
@@ -99,6 +96,21 @@ Or set `SMART_ROUTER_PROXY_CONFIG` to a custom path.
 ## Client Auth
 
 Set `SMART_ROUTER_PROXY_TOKEN` to require a bearer token from clients.
+
+## Response Annotation
+
+Set `annotate_response: true` in `config.yaml` to prepend a visible routing
+tag to each assistant reply so callers can see which task class and model
+answered:
+
+```
+[software_engineering :: z-ai/glm-5.2 (glm)]
+<assistant content follows>
+```
+
+Applied to both streaming and non-streaming chat completions. Off by default —
+responses pass through verbatim. The routed concrete model is always written to
+the response `model` field regardless of this flag.
 
 ## License
 

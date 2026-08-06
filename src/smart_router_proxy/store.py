@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS pins (
     key_hash TEXT PRIMARY KEY,
     slug TEXT NOT NULL,
     alias TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '-',
     pinned_at REAL NOT NULL
 );
 """
@@ -80,6 +81,15 @@ class Store:
             self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
         self._db.commit()
+        # Migration: older pins tables predate the category column.
+        cols = {
+            r[1] for r in self._db.execute("PRAGMA table_info(pins)").fetchall()
+        }
+        if "category" not in cols:
+            self._db.execute(
+                "ALTER TABLE pins ADD COLUMN category TEXT NOT NULL DEFAULT '-'"
+            )
+            self._db.commit()
 
     # ── Usage ledger ─────────────────────────────────────────────────
 
@@ -177,22 +187,24 @@ class Store:
 
     # ── Pin persistence ──────────────────────────────────────────────
 
-    def get_pin(self, key_hash: str) -> tuple[str, str, float] | None:
+    def get_pin(self, key_hash: str) -> tuple[str, str, str, float] | None:
         with self._lock:
             row = self._db.execute(
-                "SELECT slug, alias, pinned_at FROM pins WHERE key_hash = ?",
+                "SELECT slug, alias, category, pinned_at FROM pins WHERE key_hash = ?",
                 (key_hash,),
             ).fetchone()
         if row is None:
             return None
-        return (str(row[0]), str(row[1]), float(row[2]))
+        return (str(row[0]), str(row[1]), str(row[2]), float(row[3]))
 
-    def save_pin(self, key_hash: str, slug: str, alias: str, pinned_at: float) -> None:
+    def save_pin(
+        self, key_hash: str, slug: str, alias: str, category: str, pinned_at: float
+    ) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO pins (key_hash, slug, alias, pinned_at)"
-                " VALUES (?, ?, ?, ?)",
-                (key_hash, slug, alias, pinned_at),
+                "INSERT OR REPLACE INTO pins (key_hash, slug, alias, category, pinned_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (key_hash, slug, alias, category, pinned_at),
             )
             self._db.commit()
 

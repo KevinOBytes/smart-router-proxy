@@ -140,14 +140,15 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         except Exception as exc:
             logger.debug("usage recording failed: %s", exc)
 
-    def _annotate_content(content: str, model: str, alias: str) -> str:
-        """Prepend a visible 'selected model' note to assistant content.
+    def _annotate_content(content: str, model: str, alias: str, category: str) -> str:
+        """Prepend a visible 'category :: model' note to assistant content.
 
         The response body's ``model`` field is rewritten to the routed slug
         already (client-visible via API), but humans reading plain text also
-        need to see which model answered.
+        need to see which category and model answered. Only applied when
+        ``annotate_response`` is enabled.
         """
-        return f"[{alias} :: {model}]\n{content}"
+        return f"[{category} :: {model} ({alias})]\n{content}"
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Any:
@@ -168,9 +169,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         # Route only the virtual model; pass real model names through untouched.
         routed_alias = "-"
         routed_slug = ""
+        routed_category = "-"
         if requested_model in (cfg.virtual_model, f"tko/{cfg.virtual_model}"):
             text = extract_user_text(messages)
-            slug, routed_alias = await router.route(text, session_key)
+            slug, routed_alias, routed_category = await router.route(text, session_key)
             routed_slug = slug
             body["model"] = slug
             # OpenRouter sticky routing: pin this conversation to the same
@@ -178,9 +180,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             if session_key and "session_id" not in body:
                 body["session_id"] = session_key
             logger.info(
-                "routed request_id=%s alias=%s model=%s",
+                "routed request_id=%s alias=%s category=%s model=%s",
                 uuid.uuid4().hex[:8],
                 routed_alias,
+                routed_category,
                 slug,
             )
 
@@ -215,13 +218,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 started=started,
                 status=resp.status_code,
             )
-            if routed_alias != "-":
+            if routed_alias != "-" and cfg.annotate_response:
                 try:
                     msg = payload.get("choices", [{}])[0].get("message") or {}
                     content = msg.get("content")
                     if isinstance(content, str):
                         msg["content"] = _annotate_content(
-                            content, routed_slug, routed_alias
+                            content, routed_slug, routed_alias, routed_category
                         )
                 except Exception as exc:
                     logger.debug("content annotation failed: %s", exc)
@@ -245,7 +248,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 status = upstream.status_code
                 async for chunk in upstream.aiter_bytes():
                     buffer = (buffer + chunk)[-16384:]  # tail only, for usage
-                    if first and routed_alias != "-" and status == 200:
+                    if first and routed_alias != "-" and status == 200 and cfg.annotate_response:
                         first = False
                         try:
                             note = json.dumps(
@@ -260,7 +263,8 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                                             "delta": {
                                                 "role": "assistant",
                                                 "content": (
-                                                    f"[{routed_alias} :: {routed_slug}]\n"
+                                                    f"[{routed_category} :: "
+                                                    f"{routed_slug} ({routed_alias})]\n"
                                                 ),
                                             },
                                             "finish_reason": None,

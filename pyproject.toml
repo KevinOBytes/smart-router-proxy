@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "smart-router-proxy"
 version = "0.1.0"
-description = "OpenAI-compatible proxy server with task-aware model routing: classifies requests via local Gemma (Ollama) and routes to the optimal OpenRouter model"
+description = "OpenAI-compatible proxy with BERT-based task-aware model routing to optimal OpenRouter models"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
     {name = "Kevin O'Connor", email = "kevin@kevinbytes.com"},
 ]
-keywords = ["openai", "proxy", "llm", "router", "openrouter", "ollama"]
+keywords = ["openai", "proxy", "llm", "router", "openrouter", "classifier"]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
@@ -46,8 +46,6 @@ target-version = "py311"
 select = ["E", "F", "I", "W", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
-# Vendored verbatim from hermes-smart-router (different line-length policy).
-"src/smart_router_proxy/deterministic.py" = ["E501"]
 
 [tool.mypy]
 strict = true

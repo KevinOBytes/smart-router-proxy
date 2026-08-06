@@ -40,6 +40,10 @@ session_ttl_seconds: 3600
 # never prompt or completion content.
 store_path: ~/.smart-router-proxy/state.db
 
+# Prepend a visible routing tag ([category :: model (alias)]) to assistant
+# content. Off by default — set true to see the classification + model per reply.
+annotate_response: false
+
 # Optional alias -> slug overrides (defaults come from hermes-smart-router)
 aliases: {}
 #  luna:
