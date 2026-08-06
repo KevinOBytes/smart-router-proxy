@@ -10,4 +10,9 @@ if [ -z "${KEY:-}" ]; then
 fi
 
 export OPENROUTER_API_KEY="$KEY"
-exec .venv/bin/smart-router-proxy --config config.yaml
+
+# exec -a sets a clean process name so the proxy shows as "smart-router-proxy"
+# (not "bash" / "python3.13") in Activity Monitor / the macOS Background
+# activity register. Exec the python binary directly (not the shebang script)
+# so the argv[0] override actually sticks. $@ is passthrough for extra flags.
+exec -a "smart-router-proxy" .venv/bin/python3 -m smart_router_proxy.server --config config.yaml "$@"

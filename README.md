@@ -112,6 +112,43 @@ Applied to both streaming and non-streaming chat completions. Off by default —
 responses pass through verbatim. The routed concrete model is always written to
 the response `model` field regardless of this flag.
 
+## Run as a Service (macOS)
+
+Run the proxy persistently as a login LaunchAgent so it survives reboots and
+keeps running independent of any terminal/session:
+
+```bash
+./install.sh install     # install + start as a login service
+./install.sh status      # show load state, process, port
+./install.sh start       # start an installed service
+./install.sh stop        # stop (note: KeepAlive relaunches it)
+./install.sh uninstall   # stop and remove the service
+```
+
+How it works:
+
+- Generates `~/Library/LaunchAgents/com.kevinbytes.smart-router-proxy.plist`
+  from `com.kevinbytes.smart-router-proxy.plist.tpl`, substituting the repo
+  path and a `log/` directory.
+- `RunAtLoad=true` starts it at login; `KeepAlive=true` restarts it on crash.
+- `run.sh` supplies `OPENROUTER_API_KEY` from `~/.hermes/.env`.
+- Logs: `log/proxy.log`, `log/proxy-error.log` (gitignored).
+
+Manual equivalent (if you prefer `launchctl` directly):
+
+```bash
+launchctl bootstrap "gui/$(id -u)" \
+  ~/Library/LaunchAgents/com.kevinbytes.smart-router-proxy.plist
+launchctl print "gui/$(id -u)/com.kevinbytes.smart-router-proxy"   # inspect
+launchctl bootout "gui/$(id -u)/com.kevinbytes.smart-router-proxy" # stop
+```
+
+To run in the foreground instead (not as a service):
+
+```bash
+./run.sh
+```
+
 ## License
 
 MIT

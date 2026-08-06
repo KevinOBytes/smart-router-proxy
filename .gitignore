@@ -26,3 +26,6 @@ venv/
 !.env.example
 config.yaml
 !config.example.yaml
+
+# Runtime (service logs and generated LaunchAgent)
+log/
