@@ -145,6 +145,31 @@ The proxy tracks token counts, costs, and latency per model. Query stats:
 curl http://127.0.0.1:8199/v1/stats
 ```
 
+## Control Panel
+
+A localhost-first web control panel ships with the proxy at:
+
+```text
+http://127.0.0.1:8199/ui
+```
+
+It is served by the existing FastAPI process — no separate daemon, Node
+runtime, or public service. The panel shows:
+
+- live health for the proxy, classifier, OpenRouter upstream, and Ollama;
+- the eight task-class routing rows with searchable primary/fallback pickers
+  (OpenRouter models first, installed Ollama models selectable per route);
+- a classifier test box (classification only — never calls a provider);
+- behavior settings (mode, fixed alias, response annotation, pin TTL);
+- upstream endpoint settings (secret values are never displayed — only
+  whether the named env var is present in the process);
+- session pins (content-free records) with clear-one / clear-all.
+
+Route and behavior changes apply immediately to new sessions and persist
+atomically to `config.yaml` (temp file + rename). Existing session pins are
+preserved. The admin API lives under `/api/admin/*` behind the same
+loopback / client-auth boundary as the proxy itself.
+
 ## Configuration
 
 Create `config.yaml` (the installer does this from `config.example.yaml`):

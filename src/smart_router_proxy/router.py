@@ -100,6 +100,29 @@ class Router:
             return str(mapping.fallback_slug)
         return None
 
+    def clear_pin_by_hash(self, key_hash: str) -> bool:
+        """Remove a pin by its opaque hash from memory and the store.
+
+        The control panel only ever sees hashes, so this matches the
+        in-memory cache by re-hashing each cached raw key.
+        """
+        with self._lock:
+            removed_store = bool(self._store and self._store.clear_pin(key_hash))
+            removed_mem = False
+            for k in [k for k in self._pins if hash_key(k) == key_hash]:
+                del self._pins[k]
+                removed_mem = True
+            return removed_store or removed_mem
+
+    def clear_all_pins(self) -> int:
+        """Remove every pin from memory and the store; returns count."""
+        with self._lock:
+            n = len(self._pins)
+            self._pins.clear()
+            if self._store is not None:
+                n = max(n, self._store.clear_pins())
+            return n
+
     async def _classify_alias(self, text: str) -> tuple[str, str]:
         """Return (alias, task_category) for the given text."""
         if not text:
@@ -121,10 +144,20 @@ class Router:
 
         Returns the escalation alias when risk is high/critical, else the
         primary route alias. Category is the classified task class.
+        Control-panel route_overrides replace the primary/fallback aliases
+        for a task class while keeping escalation behavior intact.
         """
         category = result.task_class.value
         if result.confidence < self._config.classifier.confidence_threshold:
             return FALLBACK_ALIAS, category
+        override = self._config.route_overrides.get(category)
+        if override:
+            primary = str(override.get("primary_alias") or "")
+            fallback = str(override.get("fallback_alias") or "")
+            if primary:
+                if result.risk.value in ("high", "critical") and fallback:
+                    return fallback, category
+                return primary, category
         route = DEFAULT_ROUTE_TABLE.get(result.task_class)
         if route is None:
             return FALLBACK_ALIAS, category

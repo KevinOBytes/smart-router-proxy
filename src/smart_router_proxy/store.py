@@ -215,6 +215,36 @@ class Store:
             )
             self._db.commit()
 
+    def list_pins(self) -> list[dict[str, Any]]:
+        """Content-free pin records for the admin panel (no session content)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key_hash, slug, alias, category, pinned_at FROM pins"
+                " ORDER BY pinned_at DESC"
+            ).fetchall()
+        return [
+            {
+                "id": str(r[0]),
+                "slug": str(r[1]),
+                "alias": str(r[2]),
+                "category": str(r[3]),
+                "pinned_at": float(r[4]),
+            }
+            for r in rows
+        ]
+
+    def clear_pin(self, key_hash: str) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM pins WHERE key_hash = ?", (key_hash,))
+            self._db.commit()
+        return cur.rowcount > 0
+
+    def clear_pins(self) -> int:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM pins")
+            self._db.commit()
+        return cur.rowcount
+
     def close(self) -> None:
         with self._lock:
             self._db.close()

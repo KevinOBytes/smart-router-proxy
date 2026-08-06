@@ -1,0 +1,367 @@
+"use strict";
+
+/* smart-router-proxy control panel — localhost-first admin UI.
+   Renders server state only; never displays credentials. All catalog
+   content is treated as untrusted data and rendered via textContent. */
+
+const $ = (id) => document.getElementById(id);
+
+let state = null;
+let catalog = null;
+
+function toast(msg, kind = "") {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "toast " + kind;
+  el.classList.remove("hidden");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.add("hidden"), 4000);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      if (body && body.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    } catch (_) { /* keep statusText */ }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function setStatus(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = "status " + cls;
+}
+
+/* ── State ─────────────────────────────────────────────────────────── */
+
+async function loadState() {
+  try {
+    state = await api("/api/admin/state");
+    renderHealth();
+    renderRouting();
+    renderClassifier();
+    renderBehavior();
+    renderUpstream();
+    $("revision-badge").textContent = "rev " + state.revision;
+  } catch (err) {
+    setStatus("h-proxy", "unreachable", "err");
+    $("conn-badge").textContent = "disconnected";
+    $("conn-badge").className = "badge err";
+    toast("Failed to load state: " + err.message, "err");
+  }
+}
+
+function renderHealth() {
+  const s = state.server, c = state.classifier, u = state.upstream, o = state.ollama;
+  setStatus("h-proxy", `${s.host}:${s.port}${s.loopback ? "" : " (non-loopback)"}`, s.loopback ? "ok" : "warn");
+  setStatus("h-classifier", c.ready ? "ready" : "not loaded", c.ready ? "ok" : "warn");
+  setStatus("h-upstream", u.api_key_set ? "key set" : "key missing", u.api_key_set ? "ok" : "err");
+  setStatus("h-ollama", o.reachable ? "reachable" : "unavailable", o.reachable ? "ok" : "warn");
+  setStatus("h-auth", s.client_auth_configured ? "configured" : "none (localhost)", s.client_auth_configured ? "ok" : "muted");
+}
+
+function renderRouting() {
+  const body = $("routing-body");
+  body.innerHTML = "";
+  if (!state.routing.length) {
+    // Static constant string only — no interpolated data (XSS-safe).
+    body.innerHTML = '<tr><td colspan="6" class="muted">No task classes.</td></tr>';
+    return;
+  }
+  for (const row of state.routing) {
+    const tr = document.createElement("tr");
+
+    const tdLabel = document.createElement("td");
+    tdLabel.textContent = row.label;
+    const tdClass = document.createElement("td");
+    tdClass.className = "mono muted";
+    tdClass.textContent = row.task_class;
+
+    const tdPrimary = document.createElement("td");
+    tdPrimary.appendChild(modelSelect(row.task_class, "primary", row.primary_alias));
+    const tdFallback = document.createElement("td");
+    tdFallback.appendChild(modelSelect(row.task_class, "fallback", row.fallback_alias));
+
+    const tdProvider = document.createElement("td");
+    const dest = destFor(row.primary_alias);
+    const tag = document.createElement("span");
+    tag.className = "tag " + (dest ? dest.provider : "openrouter");
+    tag.textContent = dest ? dest.provider : "openrouter";
+    tdProvider.appendChild(tag);
+
+    const tdState = document.createElement("td");
+    const pill = document.createElement("span");
+    pill.className = "state-pill " + (row.overridden ? "changed" : "persisted");
+    pill.textContent = row.overridden ? "customized" : "default";
+    tdState.appendChild(pill);
+
+    const tdBtn = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.className = "btn ghost";
+    btn.textContent = "Save";
+    btn.addEventListener("click", () => saveRouting(row.task_class, btn));
+    tdBtn.appendChild(btn);
+
+    tr.append(tdLabel, tdClass, tdPrimary, tdFallback, tdProvider, tdState, tdBtn);
+    body.appendChild(tr);
+  }
+}
+
+function destFor(alias) {
+  if (!state) return null;
+  return state.routing[0].destinations.find((d) => d.alias === alias) || null;
+}
+
+function modelSelect(taskClass, slot, current) {
+  const select = document.createElement("select");
+  select.dataset.task = taskClass;
+  select.dataset.slot = slot;
+
+  const opts = new Map();
+  for (const dest of state.routing[0].destinations) {
+    opts.set(dest.alias, `${dest.alias} — ${dest.provider}:${dest.model_slug}`);
+  }
+  for (const [alias, label] of opts) {
+    const opt = document.createElement("option");
+    opt.value = alias;
+    opt.textContent = label;
+    select.appendChild(opt);
+  }
+  if (opts.has(current)) select.value = current;
+  else {
+    const missing = document.createElement("option");
+    missing.value = current;
+    missing.textContent = current + " (stale)";
+    select.appendChild(missing);
+    select.value = current;
+  }
+  return select;
+}
+
+async function saveRouting(taskClass, btn) {
+  const primary = document.querySelector(`select[data-task="${taskClass}"][data-slot="primary"]`).value;
+  const fallback = document.querySelector(`select[data-task="${taskClass}"][data-slot="fallback"]`).value;
+  btn.disabled = true;
+  try {
+    await api(`/api/admin/config/routing`, {
+      method: "PATCH",
+      body: JSON.stringify({ task_class: taskClass, primary_alias: primary, fallback_alias: fallback }),
+    });
+    toast(`Routing updated for ${taskClass}`);
+    await loadState();
+  } catch (err) {
+    toast("Routing update failed: " + err.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── Classifier ────────────────────────────────────────────────────── */
+
+function renderClassifier() {
+  const c = state.classifier;
+  $("conf-threshold").value = c.confidence_threshold;
+  $("classifier-readonly").textContent = `model: ${c.model_path}`;
+}
+
+async function saveClassifier() {
+  const threshold = parseFloat($("conf-threshold").value);
+  if (isNaN(threshold)) return toast("Invalid threshold", "err");
+  try {
+    await api("/api/admin/config/classifier", {
+      method: "PATCH",
+      body: JSON.stringify({ confidence_threshold: threshold }),
+    });
+    toast("Classifier threshold applied");
+    await loadState();
+  } catch (err) {
+    toast("Classifier update failed: " + err.message, "err");
+  }
+}
+
+async function classify() {
+  const text = $("classify-text").value.trim();
+  if (!text) return toast("Enter a prompt to classify", "warn");
+  const btn = $("btn-classify");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/admin/classify", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    const out = $("classify-result");
+    out.textContent =
+      `task_class : ${res.task_class}\n` +
+      `alias      : ${res.alias}\n` +
+      `model_slug : ${res.model_slug}\n` +
+      `note       : ${res.note}`;
+    out.classList.remove("hidden");
+  } catch (err) {
+    toast("Classification failed: " + err.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── Behavior ──────────────────────────────────────────────────────── */
+
+function renderBehavior() {
+  const b = state.behavior;
+  $("mode").value = b.mode;
+  $("fixed-alias").value = b.fixed_alias;
+  $("annotate").checked = b.annotate_response;
+  $("session-ttl").value = b.session_ttl_seconds;
+  $("virtual-model-label").textContent = `virtual model: ${b.virtual_model} (read-only)`;
+}
+
+async function saveBehavior() {
+  try {
+    await api("/api/admin/config/behavior", {
+      method: "PATCH",
+      body: JSON.stringify({
+        mode: $("mode").value,
+        fixed_alias: $("fixed-alias").value.trim(),
+        annotate_response: $("annotate").checked,
+        session_ttl_seconds: parseInt($("session-ttl").value, 10),
+      }),
+    });
+    toast("Behavior applied");
+    await loadState();
+  } catch (err) {
+    toast("Behavior update failed: " + err.message, "err");
+  }
+}
+
+/* ── Upstream ──────────────────────────────────────────────────────── */
+
+function renderUpstream() {
+  const u = state.upstream;
+  $("upstream-url").value = u.base_url;
+  $("upstream-env").value = u.api_key_env;
+  $("upstream-timeout").value = u.timeout_seconds;
+  $("upstream-key-status").textContent = u.api_key_set ? "key present in process" : "key NOT set in process";
+}
+
+async function saveUpstream() {
+  const msg = $("upstream-save-msg");
+  msg.textContent = "validating…";
+  try {
+    await api("/api/admin/config/upstream", {
+      method: "PATCH",
+      body: JSON.stringify({
+        base_url: $("upstream-url").value.trim(),
+        api_key_env: $("upstream-env").value.trim(),
+        timeout_seconds: parseFloat($("upstream-timeout").value),
+      }),
+    });
+    msg.textContent = "applied";
+    toast("Upstream configuration applied");
+    await loadState();
+  } catch (err) {
+    msg.textContent = "";
+    toast("Upstream update failed: " + err.message, "err");
+  }
+}
+
+/* ── Catalog ───────────────────────────────────────────────────────── */
+
+async function refreshCatalog() {
+  const btn = $("btn-refresh-catalog");
+  btn.disabled = true;
+  try {
+    catalog = await api("/api/admin/catalog/refresh", { method: "POST" });
+    const n = catalog.openrouter.models.length;
+    const m = catalog.ollama.models.length;
+    toast(`Catalog refreshed: ${n} OpenRouter, ${m} Ollama${catalog.openrouter.stale || catalog.ollama.stale ? " (some stale)" : ""}`);
+  } catch (err) {
+    toast("Catalog refresh failed: " + err.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── Pins ──────────────────────────────────────────────────────────── */
+
+async function loadPins() {
+  try {
+    const res = await api("/api/admin/pins");
+    const body = $("pins-body");
+    body.innerHTML = "";
+    if (!res.pins.length) {
+      // Static constant string only — no interpolated data (XSS-safe).
+      body.innerHTML = '<tr><td colspan="6" class="muted">No active pins.</td></tr>';
+      return;
+    }
+    for (const pin of res.pins) {
+      const tr = document.createElement("tr");
+      const tdId = document.createElement("td");
+      tdId.className = "mono";
+      tdId.textContent = pin.id;
+      const tdAlias = document.createElement("td");
+      tdAlias.className = "mono";
+      tdAlias.textContent = pin.alias;
+      const tdSlug = document.createElement("td");
+      tdSlug.className = "mono";
+      tdSlug.textContent = pin.slug;
+      const tdCat = document.createElement("td");
+      tdCat.className = "mono muted";
+      tdCat.textContent = pin.category;
+      const tdTime = document.createElement("td");
+      tdTime.className = "mono muted";
+      tdTime.textContent = new Date(pin.pinned_at * 1000).toLocaleString();
+      const tdBtn = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.className = "btn danger";
+      btn.textContent = "Clear";
+      btn.addEventListener("click", () => clearPin(pin.id));
+      tdBtn.appendChild(btn);
+      tr.append(tdId, tdAlias, tdSlug, tdCat, tdTime, tdBtn);
+      body.appendChild(tr);
+    }
+  } catch (err) {
+    toast("Failed to load pins: " + err.message, "err");
+  }
+}
+
+async function clearPin(id) {
+  if (!confirm(`Clear pin ${id}? The conversation may switch models on its next request.`)) return;
+  try {
+    await api("/api/admin/pins/" + encodeURIComponent(id), { method: "DELETE" });
+    toast("Pin cleared");
+    await loadPins();
+  } catch (err) {
+    toast("Failed to clear pin: " + err.message, "err");
+  }
+}
+
+async function clearAllPins() {
+  if (!confirm("Clear ALL session pins? Active conversations may switch models on their next request.")) return;
+  try {
+    const res = await api("/api/admin/pins", { method: "DELETE" });
+    toast(`Cleared ${res.removed} pin(s)`);
+    await loadPins();
+  } catch (err) {
+    toast("Failed to clear pins: " + err.message, "err");
+  }
+}
+
+/* ── Wire up ───────────────────────────────────────────────────────── */
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("btn-save-classifier").addEventListener("click", saveClassifier);
+  $("btn-classify").addEventListener("click", classify);
+  $("btn-save-behavior").addEventListener("click", saveBehavior);
+  $("btn-save-upstream").addEventListener("click", saveUpstream);
+  $("btn-refresh-catalog").addEventListener("click", refreshCatalog);
+  $("btn-clear-all-pins").addEventListener("click", clearAllPins);
+
+  loadState().then(loadPins);
+});

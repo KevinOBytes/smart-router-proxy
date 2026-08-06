@@ -21,14 +21,17 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
-from smart_router_proxy.config import ProxyConfig, load_config
+from smart_router_proxy.admin import build_admin_router
+from smart_router_proxy.catalog import CatalogCache
+from smart_router_proxy.config import ProxyConfig, RuntimeConfig, load_config, resolve_config_path
 from smart_router_proxy.router import Router, extract_user_text
 from smart_router_proxy.store import Store, hash_key, parse_usage
 
@@ -37,12 +40,19 @@ logger = logging.getLogger("smart_router_proxy")
 # Upstream statuses worth one retry on the fallback model.
 _RETRYABLE = {429, 500, 502, 503, 504}
 
+# Control-panel assets live beside the package.
+_STATIC_DIR = Path(__file__).parent / "static"
 
-def create_app(config: ProxyConfig | None = None) -> FastAPI:
-    cfg = config or load_config()
+
+def create_app(
+    config: ProxyConfig | None = None, config_path: str | Path | None = None
+) -> FastAPI:
+    cfg = config or load_config(config_path)
     store = Store(cfg.store_path)
     store.prune_pins(cfg.session_ttl_seconds)
     router = Router(cfg, store=store)
+    runtime = RuntimeConfig(cfg, config_path=config_path or resolve_config_path(config_path))
+    catalog = CatalogCache()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -50,8 +60,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             base_url=cfg.upstream.base_url,
             timeout=cfg.upstream.timeout_seconds,
         )
+        app.state.ollama_http = httpx.AsyncClient(
+            base_url=cfg.ollama.base_url,
+            timeout=cfg.ollama.timeout_seconds,
+        )
         yield
         await app.state.http.aclose()
+        await app.state.ollama_http.aclose()
         store.close()
 
     app = FastAPI(title="smart-router-proxy", lifespan=lifespan)
@@ -86,6 +101,38 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         checks["upstream_key_set"] = bool(cfg.upstream.api_key)
         status = 200 if all(checks.values()) else 503
         return JSONResponse(checks, status_code=status)
+
+    # ── Control panel (localhost-first, same auth boundary) ─────────────
+
+    def _ollama_client() -> httpx.AsyncClient | None:
+        try:
+            client = app.state.ollama_http
+        except Exception:
+            return None
+        return client if isinstance(client, httpx.AsyncClient) else None
+
+    admin = build_admin_router(
+        runtime=runtime,
+        store=store,
+        catalog=catalog,
+        router_runtime=router,
+        get_upstream_headers=_upstream_headers,
+        get_ollama_client=_ollama_client,
+        require_auth=_check_client_auth,
+    )
+    app.include_router(admin)
+
+    @app.get("/ui", include_in_schema=False)
+    async def control_panel() -> FileResponse:
+        index = _STATIC_DIR / "index.html"
+        if not index.is_file():
+            raise HTTPException(status_code=404, detail="Control panel not bundled")
+        return FileResponse(index, media_type="text/html")
+
+    if _STATIC_DIR.is_dir():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/v1/stats")
     async def stats(request: Request) -> JSONResponse:

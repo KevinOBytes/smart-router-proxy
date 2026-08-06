@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>smart-router-proxy — Control Panel</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◆</span>
+      <div>
+        <h1>smart-router-proxy</h1>
+        <p class="sub">BERT routing control panel · localhost</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="revision-badge" class="badge">rev —</span>
+      <span id="conn-badge" class="badge ok">connected</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="health" class="grid cards">
+      <div class="card"><h3>Proxy</h3><p id="h-proxy" class="status pending">…</p></div>
+      <div class="card"><h3>Classifier</h3><p id="h-classifier" class="status pending">…</p></div>
+      <div class="card"><h3>OpenRouter</h3><p id="h-upstream" class="status pending">…</p></div>
+      <div class="card"><h3>Ollama</h3><p id="h-ollama" class="status pending">…</p></div>
+      <div class="card"><h3>Client auth</h3><p id="h-auth" class="status pending">…</p></div>
+      <div class="card"><h3>Session pins</h3><p id="h-pins" class="status pending">…</p></div>
+    </section>
+
+    <section id="routing-section">
+      <div class="section-head">
+        <h2>Routing Matrix</h2>
+        <button id="btn-refresh-catalog" class="btn ghost">Refresh model catalog</button>
+      </div>
+      <p class="hint">Changes apply to new sessions immediately and persist across restarts. Existing session pins are preserved.</p>
+      <div class="table-wrap">
+        <table id="routing-table">
+          <thead>
+            <tr>
+              <th>Task class</th>
+              <th>Primary</th>
+              <th>Fallback</th>
+              <th>Provider</th>
+              <th>State</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="routing-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="classifier-section">
+      <div class="section-head"><h2>Classifier</h2></div>
+      <div class="form-row">
+        <label for="conf-threshold">Confidence threshold</label>
+        <input id="conf-threshold" type="number" min="0.05" max="0.99" step="0.01">
+        <button id="btn-save-classifier" class="btn">Apply</button>
+        <span id="classifier-readonly" class="muted"></span>
+      </div>
+      <div class="form-row">
+        <label for="classify-text">Test prompt (classification only — no provider is called)</label>
+        <textarea id="classify-text" rows="3" placeholder="e.g. Write a FastAPI endpoint that validates JWTs"></textarea>
+        <button id="btn-classify" class="btn">Classify</button>
+      </div>
+      <pre id="classify-result" class="result-box hidden"></pre>
+    </section>
+
+    <section id="behavior-section">
+      <div class="section-head"><h2>Behavior</h2></div>
+      <div class="form-row">
+        <label for="mode">Operating mode</label>
+        <select id="mode">
+          <option value="active">active — classify and route</option>
+          <option value="fixed">fixed — always use fixed alias</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="fixed-alias">Fixed alias</label>
+        <input id="fixed-alias" type="text" maxlength="64">
+      </div>
+      <div class="form-row">
+        <label for="annotate">Annotate responses</label>
+        <input id="annotate" type="checkbox">
+        <span class="muted">prepend [category :: model (alias)]</span>
+      </div>
+      <div class="form-row">
+        <label for="session-ttl">Session pin TTL (seconds)</label>
+        <input id="session-ttl" type="number" min="60" max="604800">
+      </div>
+      <div class="form-row">
+        <span class="muted" id="virtual-model-label"></span>
+        <button id="btn-save-behavior" class="btn">Apply behavior</button>
+      </div>
+    </section>
+
+    <section id="upstream-section">
+      <div class="section-head"><h2>Upstream</h2></div>
+      <div class="form-row">
+        <label for="upstream-url">Base URL</label>
+        <input id="upstream-url" type="text" maxlength="512">
+      </div>
+      <div class="form-row">
+        <label for="upstream-env">API key env var</label>
+        <input id="upstream-env" type="text" maxlength="128">
+        <span id="upstream-key-status" class="muted"></span>
+      </div>
+      <div class="form-row">
+        <label for="upstream-timeout">Timeout (seconds)</label>
+        <input id="upstream-timeout" type="number" min="1" max="3600" step="0.5">
+      </div>
+      <div class="form-row">
+        <button id="btn-save-upstream" class="btn">Apply upstream</button>
+        <span id="upstream-save-msg" class="muted"></span>
+      </div>
+    </section>
+
+    <section id="pins-section">
+      <div class="section-head">
+        <h2>Session Pins</h2>
+        <button id="btn-clear-all-pins" class="btn danger">Clear all pins</button>
+      </div>
+      <p class="hint">Pins are content-free: only opaque session hashes, routed model, and expiry are stored.</p>
+      <div class="table-wrap">
+        <table id="pins-table">
+          <thead>
+            <tr><th>Session (hash)</th><th>Alias</th><th>Model</th><th>Class</th><th>Pinned</th><th></th></tr>
+          </thead>
+          <tbody id="pins-body"><tr><td colspan="6" class="muted">No active pins.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

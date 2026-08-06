@@ -163,9 +163,16 @@ class HealthStatus(BaseModel):
 
 
 class AliasMapping(BaseModel):
-    """Mapping from a logical alias to a concrete OpenRouter model slug."""
+    """Mapping from a logical alias to a concrete model destination.
+
+    ``provider`` is explicit ("openrouter" or "ollama") — it is never
+    inferred from the slug. OpenRouter destinations dispatch to the
+    configured upstream; Ollama destinations dispatch to the native
+    loopback Ollama API.
+    """
 
     alias: str
+    provider: str = "openrouter"
     model_slug: str
     requires_tools: bool = True
     requires_vision: bool = False
