@@ -61,25 +61,33 @@ class TestExtractUserText:
 
 class TestRouting:
     async def test_deterministic_coding_route(self, router: Router) -> None:
-        slug, alias, category = await router.route(
+        decision = await router.route(
             "Fix the failing pytest suite in my Python repo and refactor the module"
         )
-        assert alias == "glm"
-        assert slug == "z-ai/glm-5.2"
-        assert category == "software_engineering"
+        assert decision.alias == "glm"
+        assert decision.slug == "z-ai/glm-5.2"
+        assert decision.provider == "openrouter"
+        assert decision.category == "software_engineering"
+        assert decision.routed is True
 
     async def test_empty_text_falls_back(self, router: Router) -> None:
-        slug, alias, category = await router.route("")
-        assert alias == FALLBACK_ALIAS
-        assert category == "-"
+        decision = await router.route("")
+        assert decision.alias == FALLBACK_ALIAS
+        assert decision.category == "-"
+        assert decision.slug == "openai/gpt-5.6-luna"
 
     async def test_session_pinning(self, router: Router) -> None:
-        slug1, alias1, cat1 = await router.route(
+        d1 = await router.route(
             "Fix the failing pytest suite in my repo", session_key="s1"
         )
         # Same session: different text must reuse the pinned route.
-        slug2, alias2, cat2 = await router.route("now say hello", session_key="s1")
-        assert (slug1, alias1, cat1) == (slug2, alias2, cat2)
+        d2 = await router.route("now say hello", session_key="s1")
+        assert (d1.slug, d1.alias, d1.category, d1.provider) == (
+            d2.slug,
+            d2.alias,
+            d2.category,
+            d2.provider,
+        )
 
     async def test_session_pin_ttl_slides_on_hit(self) -> None:
         """Active conversations must never re-route (cache-cost protection).
@@ -93,31 +101,91 @@ class TestRouting:
 
         cfg = ProxyConfig(session_ttl_seconds=3600)
         r = Router(cfg)
-        slug1, alias1, _cat1 = await r.route(
+        d1 = await r.route(
             "Fix the failing pytest suite in my repo", session_key="s-slide"
         )
         # Simulate a pin created 59 minutes ago (1 min before expiry).
         with r._lock:
-            s, a, cat, _ = r._pins["s-slide"]
-            r._pins["s-slide"] = (s, a, cat, _time.time() - 3540)
+            pin = r._pins["s-slide"]
+            r._pins["s-slide"] = (*pin[:6], _time.time() - 3540)
         # A hit at minute 59 must refresh pinned_at to now, not keep the
         # original timestamp.
-        slug2, alias2, _cat2 = await r.route("continue please", session_key="s-slide")
-        assert (slug2, alias2) == (slug1, alias1)
+        d2 = await r.route("continue please", session_key="s-slide")
+        assert (d2.slug, d2.alias) == (d1.slug, d1.alias)
         with r._lock:
-            _, _, _, refreshed_at = r._pins["s-slide"]
+            refreshed_at = r._pins["s-slide"][6]
         assert _time.time() - refreshed_at < 5
 
     async def test_fixed_mode(self) -> None:
         cfg = ProxyConfig(mode="fixed", fixed_alias="sonnet")
         r = Router(cfg)
-        slug, alias, category = await r.route("anything at all")
-        assert alias == "sonnet"
-        assert slug == "anthropic/claude-sonnet-5"
-        assert category == "-"
+        decision = await r.route("anything at all")
+        assert decision.alias == "sonnet"
+        assert decision.slug == "anthropic/claude-sonnet-5"
+        assert decision.provider == "openrouter"
+        assert decision.category == "-"
 
     async def test_alias_override(self) -> None:
         cfg = ProxyConfig(aliases={"luna": {"model_slug": "custom/other-model"}})
         r = Router(cfg)
-        slug, _alias, _cat = await r.route("")
-        assert slug == "custom/other-model"
+        decision = await r.route("")
+        assert decision.slug == "custom/other-model"
+
+    async def test_route_override_direct_openrouter(self, router: Router) -> None:
+        cfg = router._config
+        cfg.route_overrides = {
+            "software_engineering": {
+                "primary": {"provider": "openrouter", "model": "org/frontier-model"},
+                "fallback": {"provider": "openrouter", "model": "org/backup"},
+            }
+        }
+        decision = await router.route(
+            "Fix the failing pytest suite in my Python repo and refactor the module"
+        )
+        assert decision.slug == "org/frontier-model"
+        assert decision.provider == "openrouter"
+        assert decision.alias == "custom"
+        assert decision.category == "software_engineering"
+
+    async def test_route_override_direct_ollama(self, router: Router) -> None:
+        cfg = router._config
+        cfg.route_overrides = {
+            "software_engineering": {
+                "primary": {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"},
+                "fallback": None,
+            }
+        }
+        decision = await router.route(
+            "Fix the failing pytest suite in my Python repo and refactor the module"
+        )
+        assert decision.slug == "qwen3.6:35b-a3b-q4_K_M"
+        assert decision.provider == "ollama"
+        assert decision.alias == "custom"
+
+    async def test_route_override_direct_escalates_to_fallback(
+        self, router: Router
+    ) -> None:
+        cfg = router._config
+        cfg.route_overrides = {
+            "software_engineering": {
+                "primary": {"provider": "openrouter", "model": "org/primary"},
+                "fallback": {"provider": "openrouter", "model": "org/fallback"},
+            }
+        }
+
+        def risky_classify(text: str) -> ClassifierResult:
+            return ClassifierResult(
+                task_class=TaskClass.SOFTWARE_ENGINEERING,
+                risk=RiskLevel.CRITICAL,
+                sensitivity=Sensitivity.INTERNAL,
+                confidence=0.95,
+            )
+
+        import smart_router_proxy.router as router_mod
+
+        router_mod.get_classifier = lambda: type(
+            "C", (), {"classify_to_result": lambda self, t: risky_classify(t)}
+        )()
+        decision = await router.route("some risky request")
+        assert decision.slug == "org/fallback"
+        assert decision.provider == "openrouter"

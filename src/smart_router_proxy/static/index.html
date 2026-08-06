@@ -34,9 +34,12 @@
     <section id="routing-section">
       <div class="section-head">
         <h2>Routing Matrix</h2>
-        <button id="btn-refresh-catalog" class="btn ghost">Refresh model catalog</button>
+        <div class="section-actions">
+          <input id="model-filter" type="text" placeholder="Filter models… (name, id)" autocomplete="off">
+          <button id="btn-refresh-catalog" class="btn ghost">Refresh model catalog</button>
+        </div>
       </div>
-      <p class="hint">Changes apply to new sessions immediately and persist across restarts. Existing session pins are preserved.</p>
+      <p class="hint">Changes apply to new sessions immediately and persist across restarts. Existing session pins are preserved. Pick any OpenRouter or installed Ollama model — or a built-in alias.</p>
       <div class="table-wrap">
         <table id="routing-table">
           <thead>

@@ -7,7 +7,7 @@
 const $ = (id) => document.getElementById(id);
 
 let state = null;
-let catalog = null;
+let catalog = { openrouter: { models: [] }, ollama: { models: [] } };
 
 function toast(msg, kind = "") {
   const el = $("toast");
@@ -68,6 +68,28 @@ function renderHealth() {
   setStatus("h-auth", s.client_auth_configured ? "configured" : "none (localhost)", s.client_auth_configured ? "ok" : "muted");
 }
 
+/* ── Catalog ───────────────────────────────────────────────────────── */
+
+async function refreshCatalog(silent = false) {
+  const btn = $("btn-refresh-catalog");
+  if (btn) btn.disabled = true;
+  try {
+    catalog = await api("/api/admin/catalog/refresh", { method: "POST" });
+    if (!silent) {
+      const n = catalog.openrouter.models.length;
+      const m = catalog.ollama.models.length;
+      toast(`Catalog refreshed: ${n} OpenRouter, ${m} Ollama${catalog.openrouter.stale || catalog.ollama.stale ? " (some stale)" : ""}`);
+    }
+    renderRouting();
+  } catch (err) {
+    if (!silent) toast("Catalog refresh failed: " + err.message, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* ── Routing matrix ────────────────────────────────────────────────── */
+
 function renderRouting() {
   const body = $("routing-body");
   body.innerHTML = "";
@@ -86,15 +108,14 @@ function renderRouting() {
     tdClass.textContent = row.task_class;
 
     const tdPrimary = document.createElement("td");
-    tdPrimary.appendChild(modelSelect(row.task_class, "primary", row.primary_alias));
+    tdPrimary.appendChild(modelSelect(row.task_class, "primary", row.primary));
     const tdFallback = document.createElement("td");
-    tdFallback.appendChild(modelSelect(row.task_class, "fallback", row.fallback_alias));
+    tdFallback.appendChild(modelSelect(row.task_class, "fallback", row.fallback));
 
     const tdProvider = document.createElement("td");
-    const dest = destFor(row.primary_alias);
     const tag = document.createElement("span");
-    tag.className = "tag " + (dest ? dest.provider : "openrouter");
-    tag.textContent = dest ? dest.provider : "openrouter";
+    tag.className = "tag " + (row.primary ? row.primary.provider : "openrouter");
+    tag.textContent = row.primary ? row.primary.provider : "openrouter";
     tdProvider.appendChild(tag);
 
     const tdState = document.createElement("td");
@@ -115,46 +136,130 @@ function renderRouting() {
   }
 }
 
-function destFor(alias) {
-  if (!state) return null;
+function filterText() {
+  const el = $("model-filter");
+  return el ? el.value.trim().toLowerCase() : "";
+}
+
+function matchesFilter(text) {
+  const f = filterText();
+  if (!f) return true;
+  return text.toLowerCase().includes(f);
+}
+
+function aliasDest(alias) {
+  if (!state || !state.routing.length) return null;
   return state.routing[0].destinations.find((d) => d.alias === alias) || null;
 }
 
+/* Build a <select> whose options are:
+   - built-in aliases (value = alias name)
+   - full OpenRouter catalog (value = "openrouter::<id>", filtered)
+   - installed Ollama models (value = "ollama::<id>", filtered) */
 function modelSelect(taskClass, slot, current) {
   const select = document.createElement("select");
   select.dataset.task = taskClass;
   select.dataset.slot = slot;
 
-  const opts = new Map();
+  const aliases = new Map();
   for (const dest of state.routing[0].destinations) {
-    opts.set(dest.alias, `${dest.alias} — ${dest.provider}:${dest.model_slug}`);
+    aliases.set(dest.alias, `${dest.alias} — ${dest.provider}:${dest.model_slug}`);
   }
-  for (const [alias, label] of opts) {
+  const orModels = catalog.openrouter.models || [];
+  const olModels = catalog.ollama.models || [];
+
+  const groupAliases = document.createElement("optgroup");
+  groupAliases.label = "Built-in aliases";
+  for (const [alias, label] of aliases) {
     const opt = document.createElement("option");
     opt.value = alias;
     opt.textContent = label;
-    select.appendChild(opt);
+    groupAliases.appendChild(opt);
   }
-  if (opts.has(current)) select.value = current;
-  else {
-    const missing = document.createElement("option");
-    missing.value = current;
-    missing.textContent = current + " (stale)";
-    select.appendChild(missing);
-    select.value = current;
+  select.appendChild(groupAliases);
+
+  if (orModels.length) {
+    const group = document.createElement("optgroup");
+    group.label = `OpenRouter (${orModels.length})`;
+    for (const m of orModels) {
+      if (!matchesFilter(m.id + " " + (m.name || ""))) continue;
+      const opt = document.createElement("option");
+      opt.value = "openrouter::" + m.id;
+      opt.textContent = m.id + (m.name && m.name !== m.id ? ` — ${m.name}` : "");
+      group.appendChild(opt);
+    }
+    select.appendChild(group);
+  }
+
+  if (olModels.length) {
+    const group = document.createElement("optgroup");
+    group.label = `Ollama installed (${olModels.length})`;
+    for (const m of olModels) {
+      if (!matchesFilter(m.id)) continue;
+      const opt = document.createElement("option");
+      opt.value = "ollama::" + m.id;
+      opt.textContent = m.id;
+      group.appendChild(opt);
+    }
+    select.appendChild(group);
+  }
+
+  // Select the current destination if it maps to an option.
+  if (current) {
+    if (current.kind === "direct") {
+      const v = `${current.provider}::${current.model_slug}`;
+      if ([...select.options].some((o) => o.value === v)) select.value = v;
+    } else if (aliases.has(current.alias)) {
+      select.value = current.alias;
+    }
+  }
+  if (!select.value) {
+    // Fall back to the first alias so the picker always has a value.
+    select.value = [...aliases.keys()][0] || "";
   }
   return select;
 }
 
+/* Parse a select value into {provider, model} — aliases resolve through
+   the state destinations list, catalog picks carry "provider::model". */
+function parsePick(value) {
+  if (!value) return null;
+  const idx = value.indexOf("::");
+  if (idx !== -1) {
+    return { provider: value.slice(0, idx), model: value.slice(idx + 2) };
+  }
+  const d = aliasDest(value);
+  return d ? { provider: d.provider, model: d.model_slug } : null;
+}
+
 async function saveRouting(taskClass, btn) {
-  const primary = document.querySelector(`select[data-task="${taskClass}"][data-slot="primary"]`).value;
-  const fallback = document.querySelector(`select[data-task="${taskClass}"][data-slot="fallback"]`).value;
+  const primarySel = document.querySelector(`select[data-task="${taskClass}"][data-slot="primary"]`);
+  const fallbackSel = document.querySelector(`select[data-task="${taskClass}"][data-slot="fallback"]`);
+  const pVal = primarySel.value;
+  const fVal = fallbackSel.value;
+
   btn.disabled = true;
   try {
-    await api(`/api/admin/config/routing`, {
-      method: "PATCH",
-      body: JSON.stringify({ task_class: taskClass, primary_alias: primary, fallback_alias: fallback }),
-    });
+    if (!pVal.includes("::") && !fVal.includes("::")) {
+      // Both slots are built-in aliases — use the alias endpoint so
+      // reverting to defaults drops the override cleanly.
+      await api("/api/admin/config/routing", {
+        method: "PATCH",
+        body: JSON.stringify({
+          task_class: taskClass,
+          primary_alias: pVal,
+          fallback_alias: fVal,
+        }),
+      });
+    } else {
+      const primary = parsePick(pVal);
+      const fallback = fVal ? parsePick(fVal) : null;
+      if (!primary) throw new Error("Could not resolve primary destination");
+      await api("/api/admin/config/routing/direct", {
+        method: "PATCH",
+        body: JSON.stringify({ task_class: taskClass, primary, fallback }),
+      });
+    }
     toast(`Routing updated for ${taskClass}`);
     await loadState();
   } catch (err) {
@@ -201,6 +306,7 @@ async function classify() {
     out.textContent =
       `task_class : ${res.task_class}\n` +
       `alias      : ${res.alias}\n` +
+      `provider   : ${res.provider}\n` +
       `model_slug : ${res.model_slug}\n` +
       `note       : ${res.note}`;
     out.classList.remove("hidden");
@@ -268,23 +374,6 @@ async function saveUpstream() {
   } catch (err) {
     msg.textContent = "";
     toast("Upstream update failed: " + err.message, "err");
-  }
-}
-
-/* ── Catalog ───────────────────────────────────────────────────────── */
-
-async function refreshCatalog() {
-  const btn = $("btn-refresh-catalog");
-  btn.disabled = true;
-  try {
-    catalog = await api("/api/admin/catalog/refresh", { method: "POST" });
-    const n = catalog.openrouter.models.length;
-    const m = catalog.ollama.models.length;
-    toast(`Catalog refreshed: ${n} OpenRouter, ${m} Ollama${catalog.openrouter.stale || catalog.ollama.stale ? " (some stale)" : ""}`);
-  } catch (err) {
-    toast("Catalog refresh failed: " + err.message, "err");
-  } finally {
-    btn.disabled = false;
   }
 }
 
@@ -360,8 +449,13 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-classify").addEventListener("click", classify);
   $("btn-save-behavior").addEventListener("click", saveBehavior);
   $("btn-save-upstream").addEventListener("click", saveUpstream);
-  $("btn-refresh-catalog").addEventListener("click", refreshCatalog);
+  $("btn-refresh-catalog").addEventListener("click", () => refreshCatalog(false));
   $("btn-clear-all-pins").addEventListener("click", clearAllPins);
+  $("model-filter").addEventListener("input", () => {
+    if (state) renderRouting();
+  });
 
   loadState().then(loadPins);
+  // Warm the catalog on load so the pickers show the full model range.
+  refreshCatalog(true);
 });

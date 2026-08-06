@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from smart_router_proxy.config import ProxyConfig
+from smart_router_proxy.models import ClassifierResult, RiskLevel, Sensitivity, TaskClass
 from smart_router_proxy.router import Router
 from smart_router_proxy.store import Store, hash_key, parse_usage
 
@@ -100,14 +103,55 @@ class TestPersistentPins:
         cfg = ProxyConfig()
 
         r1 = Router(cfg, store=store)
-        slug1, alias1, cat1 = await r1.route(
+        d1 = await r1.route(
             "Fix the failing pytest suite in my repo", session_key="persist-1"
         )
 
         # Fresh Router simulating a proxy restart — same store, empty memory.
         r2 = Router(cfg, store=store)
-        slug2, alias2, cat2 = await r2.route("continue please", session_key="persist-1")
-        assert (slug2, alias2, cat2) == (slug1, alias1, cat1)
+        d2 = await r2.route("continue please", session_key="persist-1")
+        assert (d2.slug, d2.alias, d2.category, d2.provider) == (
+            d1.slug,
+            d1.alias,
+            d1.category,
+            d1.provider,
+        )
+        store.close()
+
+    async def test_direct_pin_survives_router_restart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct (provider, model) destinations persist through restarts."""
+        store = Store(":memory:")
+        cfg = ProxyConfig()
+        cfg.route_overrides = {
+            "software_engineering": {
+                "primary": {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"},
+                "fallback": None,
+            }
+        }
+
+        fake_result = ClassifierResult(
+            task_class=TaskClass.SOFTWARE_ENGINEERING,
+            risk=RiskLevel.MODERATE,
+            sensitivity=Sensitivity.INTERNAL,
+            confidence=0.91,
+        )
+        monkeypatch.setattr(
+            "smart_router_proxy.router.get_classifier",
+            lambda: type("C", (), {"classify_to_result": lambda self, t: fake_result})(),
+        )
+
+        r1 = Router(cfg, store=store)
+        d1 = await r1.route(
+            "Fix the failing pytest suite in my repo", session_key="persist-direct"
+        )
+        assert d1.provider == "ollama"
+
+        r2 = Router(cfg, store=store)
+        d2 = await r2.route("continue please", session_key="persist-direct")
+        assert d2.slug == d1.slug
+        assert d2.provider == "ollama"
         store.close()
 
 

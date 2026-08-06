@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS pins (
     slug TEXT NOT NULL,
     alias TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT '-',
-    pinned_at REAL NOT NULL
+    pinned_at REAL NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'openrouter',
+    fallback_slug TEXT,
+    fallback_provider TEXT
 );
 """
 
@@ -89,6 +92,14 @@ class Store:
             self._db.execute(
                 "ALTER TABLE pins ADD COLUMN category TEXT NOT NULL DEFAULT '-'"
             )
+            self._db.commit()
+        # Migration: provider / fallback columns added with direct destinations.
+        if "provider" not in cols:
+            self._db.execute(
+                "ALTER TABLE pins ADD COLUMN provider TEXT NOT NULL DEFAULT 'openrouter'"
+            )
+            self._db.execute("ALTER TABLE pins ADD COLUMN fallback_slug TEXT")
+            self._db.execute("ALTER TABLE pins ADD COLUMN fallback_provider TEXT")
             self._db.commit()
 
     # ── Usage ledger ─────────────────────────────────────────────────
@@ -187,24 +198,53 @@ class Store:
 
     # ── Pin persistence ──────────────────────────────────────────────
 
-    def get_pin(self, key_hash: str) -> tuple[str, str, str, float] | None:
+    def get_pin(
+        self, key_hash: str
+    ) -> tuple[str, str, str, str, str | None, str | None, float] | None:
         with self._lock:
             row = self._db.execute(
-                "SELECT slug, alias, category, pinned_at FROM pins WHERE key_hash = ?",
+                "SELECT slug, alias, category, provider, fallback_slug,"
+                " fallback_provider, pinned_at FROM pins WHERE key_hash = ?",
                 (key_hash,),
             ).fetchone()
         if row is None:
             return None
-        return (str(row[0]), str(row[1]), str(row[2]), float(row[3]))
+        return (
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            str(row[3]),
+            str(row[4]) if row[4] is not None else None,
+            str(row[5]) if row[5] is not None else None,
+            float(row[6]),
+        )
 
     def save_pin(
-        self, key_hash: str, slug: str, alias: str, category: str, pinned_at: float
+        self,
+        key_hash: str,
+        slug: str,
+        alias: str,
+        category: str,
+        pinned_at: float,
+        provider: str = "openrouter",
+        fallback_slug: str | None = None,
+        fallback_provider: str | None = None,
     ) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO pins (key_hash, slug, alias, category, pinned_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (key_hash, slug, alias, category, pinned_at),
+                "INSERT OR REPLACE INTO pins (key_hash, slug, alias, category,"
+                " pinned_at, provider, fallback_slug, fallback_provider)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key_hash,
+                    slug,
+                    alias,
+                    category,
+                    pinned_at,
+                    provider,
+                    fallback_slug,
+                    fallback_provider,
+                ),
             )
             self._db.commit()
 

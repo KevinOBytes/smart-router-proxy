@@ -73,7 +73,9 @@ class ProxyConfig(BaseModel):
     aliases: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # task class -> {"primary_alias": str, "fallback_alias": str} overrides.
     # Control-panel managed; overrides DEFAULT_ROUTE_TABLE for that class.
-    route_overrides: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # Entries may also carry direct destinations:
+    #   {"primary": {"provider": "openrouter", "model": "<slug>"}, "fallback": {...}}
+    route_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # mode: active | fixed
     mode: str = "active"
     fixed_alias: str = "luna"

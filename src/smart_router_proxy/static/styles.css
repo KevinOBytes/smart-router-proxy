@@ -69,8 +69,10 @@ main { padding: 24px; max-width: 1200px; margin: 0 auto; }
 .status.pending { color: var(--muted); }
 
 section { margin-top: 28px; }
-.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
 .section-head h2 { margin: 0; font-size: 16px; }
+.section-actions { display: flex; gap: 8px; align-items: center; }
+.section-actions input[type="text"] { width: 240px; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 14px; }
 .muted { color: var(--muted); font-size: 12.5px; }
 

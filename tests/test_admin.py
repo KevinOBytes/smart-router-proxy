@@ -161,7 +161,7 @@ def test_classify_only_returns_route_without_calling_provider(app: TestClient) -
     assert res.status_code == 200
     body = res.json()
     assert body["task_class"] in {"software_engineering", "-"}
-    assert "provider" not in body
+    assert body["provider"] in {"openrouter", "ollama"}
     assert "no provider was called" in body["note"]
 
 
@@ -244,6 +244,93 @@ def test_routing_update_rejects_extra_fields(app: TestClient) -> None:
             "primary_alias": "luna",
             "fallback_alias": "glm",
             "sneaky": "x",
+        },
+    )
+    assert res.status_code == 422
+
+
+# ── Direct destinations (full catalog) ──────────────────────────────────
+
+
+def _seed_catalog(app: TestClient) -> None:
+    _mock_upstream(app)
+    _mock_ollama(app)
+    res = app.post("/api/admin/catalog/refresh")
+    assert res.status_code == 200
+
+
+def test_direct_routing_update_applies_and_persists(
+    app: TestClient, tmp_path: Path
+) -> None:
+    _seed_catalog(app)
+    res = app.patch(
+        "/api/admin/config/routing/direct",
+        json={
+            "task_class": "software_engineering",
+            "primary": {"provider": "openrouter", "model": "org/mock-model"},
+            "fallback": {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"},
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    row = next(
+        r for r in body["routing"] if r["task_class"] == "software_engineering"
+    )
+    assert row["overridden"] is True
+    assert row["primary"]["kind"] == "direct"
+    assert row["primary"]["provider"] == "openrouter"
+    assert row["primary"]["model_slug"] == "org/mock-model"
+    assert row["fallback"]["provider"] == "ollama"
+    assert row["fallback"]["model_slug"] == "qwen3.6:35b-a3b-q4_K_M"
+
+    # Persisted: a fresh app on the same config file sees the direct route.
+    fresh = create_app(config_path=tmp_path / "config.yaml")
+    with TestClient(fresh) as client:
+        row = next(
+            r
+            for r in client.get("/api/admin/state").json()["routing"]
+            if r["task_class"] == "software_engineering"
+        )
+        assert row["primary"]["kind"] == "direct"
+        assert row["primary"]["model_slug"] == "org/mock-model"
+
+
+def test_direct_routing_update_rejects_unknown_model(app: TestClient) -> None:
+    _seed_catalog(app)
+    res = app.patch(
+        "/api/admin/config/routing/direct",
+        json={
+            "task_class": "software_engineering",
+            "primary": {"provider": "openrouter", "model": "org/not-in-catalog"},
+            "fallback": None,
+        },
+    )
+    assert res.status_code == 400
+    assert "not in the catalog" in res.json()["detail"]
+
+
+def test_direct_routing_update_fails_closed_without_catalog(app: TestClient) -> None:
+    # No catalog refresh happened — even a valid-looking model must be
+    # rejected because it cannot be proven selectable.
+    res = app.patch(
+        "/api/admin/config/routing/direct",
+        json={
+            "task_class": "software_engineering",
+            "primary": {"provider": "openrouter", "model": "org/anything"},
+            "fallback": None,
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_direct_routing_update_rejects_bad_provider(app: TestClient) -> None:
+    _seed_catalog(app)
+    res = app.patch(
+        "/api/admin/config/routing/direct",
+        json={
+            "task_class": "software_engineering",
+            "primary": {"provider": "azure", "model": "x/y"},
+            "fallback": None,
         },
     )
     assert res.status_code == 422

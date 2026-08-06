@@ -223,11 +223,15 @@ def create_app(
         routed_alias = "-"
         routed_slug = ""
         routed_category = "-"
+        routed_fallback: str | None = None
         if requested_model in (cfg.virtual_model, f"tko/{cfg.virtual_model}"):
             text = extract_user_text(messages)
-            slug, routed_alias, routed_category = await router.route(text, session_key)
-            routed_slug = slug
-            body["model"] = slug
+            decision = await router.route(text, session_key)
+            routed_slug = decision.slug
+            routed_alias = decision.alias
+            routed_category = decision.category
+            routed_fallback = decision.fallback_slug
+            body["model"] = routed_slug
             # Inject classification metadata so downstream tracing (LiteLLM →
             # Langfuse) records the routing decision in the trace.
             existing_meta = body.get("metadata")
@@ -246,7 +250,7 @@ def create_app(
                 uuid.uuid4().hex[:8],
                 routed_alias,
                 routed_category,
-                slug,
+                routed_slug,
             )
 
         headers = _upstream_headers()
@@ -268,10 +272,13 @@ def create_app(
 
         if not stream:
             resp = await http.post("/chat/completions", json=body, headers=headers)
-            # One retry on the alias's fallback slug for transient upstream
-            # failures (429 / 5xx). Only for routed requests with a fallback.
-            if resp.status_code in _RETRYABLE and routed_alias != "-":
-                fb = router.fallback_slug(routed_alias)
+            # One retry on the fallback slug for transient upstream failures
+            # (429 / 5xx). Only for routed requests with a fallback — either
+            # the alias's configured fallback or the decision's direct one.
+            if resp.status_code in _RETRYABLE and (
+                routed_alias != "-" or routed_fallback is not None
+            ):
+                fb = routed_fallback or router.fallback_slug(routed_alias)
                 if fb and fb != body.get("model"):
                     logger.warning(
                         "upstream %s on %s — retrying on fallback %s",
