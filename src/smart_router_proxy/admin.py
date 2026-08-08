@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from smart_router_proxy.catalog import CatalogCache
 from smart_router_proxy.config import ProxyConfig, RuntimeConfig
-from smart_router_proxy.models import DEFAULT_ALIAS_MAPPINGS, DEFAULT_ROUTE_TABLE, TaskClass
+from smart_router_proxy.models import DEFAULT_ROUTE_TABLE, TaskClass
 from smart_router_proxy.router import Router
 from smart_router_proxy.store import Store
 
@@ -46,13 +46,6 @@ def is_loopback(host: str) -> bool:
 # ── Request models (strict: extra fields rejected) ──────────────────────
 
 
-class RoutingRow(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    primary_alias: str = Field(min_length=1, max_length=64)
-    fallback_alias: str = Field(min_length=1, max_length=64)
-
-
 class Destination(BaseModel):
     """A direct (provider, model) destination from the live catalogs."""
 
@@ -66,8 +59,8 @@ class RoutingUpdate(BaseModel):
     model_config = {"extra": "forbid"}
 
     task_class: TaskClass
-    primary_alias: str = Field(min_length=1, max_length=64)
-    fallback_alias: str = Field(min_length=1, max_length=64)
+    primary: Destination
+    fallback: Destination | None = None
 
 
 class ClassifierUpdate(BaseModel):
@@ -80,7 +73,8 @@ class BehaviorUpdate(BaseModel):
     model_config = {"extra": "forbid"}
 
     mode: str = Field(pattern="^(active|fixed)$")
-    fixed_alias: str = Field(min_length=1, max_length=64)
+    fixed_slug: str = Field(min_length=1, max_length=256)
+    fixed_provider: str = Field(pattern="^(openrouter|ollama)$")
     annotate_response: bool
     session_ttl_seconds: int = Field(ge=60, le=86400 * 7)
 
@@ -117,16 +111,6 @@ class ClassifyRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     text: str = Field(min_length=1, max_length=4096)
-
-
-class DirectRoutingUpdate(BaseModel):
-    """Pin a task class to direct catalog destinations."""
-
-    model_config = {"extra": "forbid"}
-
-    task_class: TaskClass
-    primary: Destination
-    fallback: Destination | None = None
 
 
 # ── Admin API ───────────────────────────────────────────────────────────
@@ -178,7 +162,8 @@ def build_admin_router(
             },
             "behavior": {
                 "mode": cfg.mode,
-                "fixed_alias": cfg.fixed_alias,
+                "fixed_slug": cfg.fixed_slug,
+                "fixed_provider": cfg.fixed_provider,
                 "annotate_response": cfg.annotate_response,
                 "session_ttl_seconds": cfg.session_ttl_seconds,
                 "virtual_model": cfg.virtual_model,
@@ -194,77 +179,43 @@ def build_admin_router(
         except Exception:
             return False
 
+    def _dest_dict(
+        provider: str, model_slug: str, *, kind: str = "direct"
+    ) -> dict[str, Any]:
+        return {"provider": provider, "model_slug": model_slug, "kind": kind}
+
     def _routing_rows(cfg: ProxyConfig) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for task in TaskClass:
             primary, fallback = DEFAULT_ROUTE_TABLE[task]
             override = cfg.route_overrides.get(task.value)
-            primary_dest = _dest_for_alias(cfg, primary)
-            fallback_dest = _dest_for_alias(cfg, fallback)
-            overridden = override is not None
-            if override:
-                direct = isinstance(override.get("primary"), dict) and "model" in override["primary"]
-                if direct:
-                    prim = override["primary"]
-                    primary_dest = {
-                        "alias": None,
-                        "provider": str(prim.get("provider", "openrouter")),
-                        "model_slug": str(prim["model"]),
-                        "kind": "direct",
-                    }
-                    fb = override.get("fallback")
-                    if isinstance(fb, dict) and fb.get("model"):
-                        fallback_dest = {
-                            "alias": None,
-                            "provider": str(fb.get("provider", "openrouter")),
-                            "model_slug": str(fb["model"]),
-                            "kind": "direct",
-                        }
-                    else:
-                        fallback_dest = None
+            overridden = override is not None and isinstance(override.get("primary"), dict)
+            primary_dest = _dest_dict(primary.provider, primary.model_slug)
+            fallback_dest: dict[str, Any] | None = _dest_dict(
+                fallback.provider, fallback.model_slug
+            )
+            if override and isinstance(override.get("primary"), dict):
+                prim = override["primary"]
+                primary_dest = _dest_dict(
+                    str(prim.get("provider", "openrouter")), str(prim["model"])
+                )
+                fb = override.get("fallback")
+                if isinstance(fb, dict) and fb.get("model"):
+                    fallback_dest = _dest_dict(
+                        str(fb.get("provider", "openrouter")), str(fb["model"])
+                    )
                 else:
-                    primary_dest = _dest_for_alias(
-                        cfg, str(override.get("primary_alias") or primary)
-                    )
-                    fallback_dest = _dest_for_alias(
-                        cfg, str(override.get("fallback_alias") or fallback)
-                    )
+                    fallback_dest = None
             rows.append(
                 {
                     "task_class": task.value,
                     "label": TASK_LABELS.get(task.value, task.value),
-                    "primary_alias": primary_dest["alias"] if primary_dest else "",
-                    "fallback_alias": fallback_dest["alias"] if fallback_dest else "",
                     "primary": primary_dest,
                     "fallback": fallback_dest,
                     "overridden": overridden,
-                    "destinations": _destinations(cfg),
                 }
             )
         return rows
-
-    def _dest_for_alias(cfg: ProxyConfig, alias: str) -> dict[str, Any] | None:
-        for d in _destinations(cfg):
-            if d["alias"] == alias:
-                return d
-        return None
-
-    def _destinations(cfg: ProxyConfig) -> list[dict[str, Any]]:
-        """Alias → destination (provider, slug) snapshot for the pickers."""
-        out: list[dict[str, Any]] = []
-        for alias, mapping in DEFAULT_ALIAS_MAPPINGS.items():
-            override = cfg.aliases.get(alias, {})
-            slug = override.get("model_slug") if isinstance(override, dict) else None
-            provider = override.get("provider") if isinstance(override, dict) else None
-            out.append(
-                {
-                    "alias": alias,
-                    "provider": provider or mapping.provider,
-                    "model_slug": slug or mapping.model_slug,
-                    "kind": "alias",
-                }
-            )
-        return out
 
     def _catalog_known(dest: Destination) -> bool:
         """Validate a direct destination against the live catalog cache.
@@ -303,24 +254,22 @@ def build_admin_router(
 
     @router.post("/classify")
     async def classify_only(body: ClassifyRequest) -> dict[str, Any]:
-        from smart_router_proxy.router import FALLBACK_ALIAS, Router
+        from smart_router_proxy.router import Router
 
         probe = Router(runtime.get())
         decision = await probe.route(body.text, session_key=None)
         return {
             "task_class": decision.category,
-            "alias": decision.alias,
             "model_slug": decision.slug,
             "provider": decision.provider,
-            "fallback_alias": FALLBACK_ALIAS,
             "note": "Classification only — no provider was called.",
         }
 
     # ── Mutations (strict, atomic via RuntimeConfig) ────────────────────
 
-    @router.patch("/config/routing/direct")
-    async def update_routing_direct(body: DirectRoutingUpdate) -> dict[str, Any]:
-        """Pin a task class to direct catalog destinations.
+    @router.patch("/config/routing")
+    async def update_routing(body: RoutingUpdate) -> dict[str, Any]:
+        """Pin a task class to concrete catalog destinations.
 
         Both primary and fallback must exist in the current catalog snapshot
         for their provider; an unrefreshed catalog fails closed so the UI
@@ -351,35 +300,25 @@ def build_admin_router(
 
         def apply(cfg: ProxyConfig) -> ProxyConfig:
             overrides = dict(cfg.route_overrides)
-            overrides[body.task_class.value] = {
-                "primary": {"provider": body.primary.provider, "model": body.primary.model},
-                "fallback": fallback_dest,
-            }
-            cfg.route_overrides = overrides
-            return cfg
-
-        try:
-            runtime.mutate(apply)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return _state()
-
-    @router.patch("/config/routing")
-    async def update_routing(body: RoutingUpdate) -> dict[str, Any]:
-        def apply(cfg: ProxyConfig) -> ProxyConfig:
-            overrides = dict(cfg.route_overrides)
             default_primary, default_fallback = DEFAULT_ROUTE_TABLE[body.task_class]
             if (
-                body.primary_alias == default_primary
-                and body.fallback_alias == default_fallback
+                body.primary.provider == default_primary.provider
+                and body.primary.model == default_primary.model_slug
+                and (
+                    body.fallback is None
+                    or (
+                        body.fallback.provider == default_fallback.provider
+                        and body.fallback.model == default_fallback.model_slug
+                    )
+                )
             ):
                 # Reverting to built-in defaults drops the override so the
                 # matrix shows "default" again instead of a no-op override.
                 overrides.pop(body.task_class.value, None)
             else:
                 overrides[body.task_class.value] = {
-                    "primary_alias": body.primary_alias,
-                    "fallback_alias": body.fallback_alias,
+                    "primary": {"provider": body.primary.provider, "model": body.primary.model},
+                    "fallback": fallback_dest,
                 }
             cfg.route_overrides = overrides
             return cfg
@@ -406,7 +345,8 @@ def build_admin_router(
     async def update_behavior(body: BehaviorUpdate) -> dict[str, Any]:
         def apply(cfg: ProxyConfig) -> ProxyConfig:
             cfg.mode = body.mode
-            cfg.fixed_alias = body.fixed_alias
+            cfg.fixed_slug = body.fixed_slug
+            cfg.fixed_provider = body.fixed_provider
             cfg.annotate_response = body.annotate_response
             cfg.session_ttl_seconds = body.session_ttl_seconds
             return cfg

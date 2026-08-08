@@ -39,7 +39,7 @@
           <button id="btn-refresh-catalog" class="btn ghost">Refresh model catalog</button>
         </div>
       </div>
-      <p class="hint">Changes apply to new sessions immediately and persist across restarts. Existing session pins are preserved. Pick any OpenRouter or installed Ollama model — or a built-in alias.</p>
+      <p class="hint">Changes apply to new sessions immediately and persist across restarts. Existing session pins are preserved. Pick any OpenRouter or installed Ollama model.</p>
       <div class="table-wrap">
         <table id="routing-table">
           <thead>
@@ -79,17 +79,24 @@
         <label for="mode">Operating mode</label>
         <select id="mode">
           <option value="active">active — classify and route</option>
-          <option value="fixed">fixed — always use fixed alias</option>
+          <option value="fixed">fixed — always use this model</option>
         </select>
       </div>
       <div class="form-row">
-        <label for="fixed-alias">Fixed alias</label>
-        <input id="fixed-alias" type="text" maxlength="64">
+        <label for="fixed-provider">Fixed provider</label>
+        <select id="fixed-provider">
+          <option value="openrouter">openrouter</option>
+          <option value="ollama">ollama</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="fixed-slug">Fixed model</label>
+        <input id="fixed-slug" type="text" maxlength="256">
       </div>
       <div class="form-row">
         <label for="annotate">Annotate responses</label>
         <input id="annotate" type="checkbox">
-        <span class="muted">prepend [category :: model (alias)]</span>
+        <span class="muted">prepend [category :: model]</span>
       </div>
       <div class="form-row">
         <label for="session-ttl">Session pin TTL (seconds)</label>
@@ -131,9 +138,9 @@
       <div class="table-wrap">
         <table id="pins-table">
           <thead>
-            <tr><th>Session (hash)</th><th>Alias</th><th>Model</th><th>Class</th><th>Pinned</th><th></th></tr>
-          </thead>
-          <tbody id="pins-body"><tr><td colspan="6" class="muted">No active pins.</td></tr></tbody>
+                    <tr><th>Session (hash)</th><th>Model</th><th>Class</th><th>Pinned</th><th></th></tr>
+                  </thead>
+                  <tbody id="pins-body"><tr><td colspan="5" class="muted">No active pins.</td></tr></tbody>
         </table>
       </div>
     </section>

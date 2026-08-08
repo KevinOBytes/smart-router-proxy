@@ -138,7 +138,7 @@ def test_nostream_annotation(app: TestClient) -> None:
     assert r.status_code == 200
     data = r.json()
     content = data["choices"][0]["message"]["content"]
-    assert content.startswith("[software_engineering :: z-ai/glm-5.2 (glm)]\n")
+    assert content.startswith("[software_engineering :: z-ai/glm-5.2]\n")
     assert content.endswith("Hello world")
     assert data["model"] == "z-ai/glm-5.2"
 
@@ -198,7 +198,6 @@ def test_routing_metadata_forwarded(app: TestClient) -> None:
     assert r.status_code == 200
     assert captured["metadata"] == {
         "task_class": "software_engineering",
-        "router_alias": "glm",
         "router_slug": "z-ai/glm-5.2",
     }
     assert json.loads(captured_headers["langfuse_trace_metadata"]) == captured["metadata"]
@@ -216,7 +215,7 @@ def test_stream_annotation(app: TestClient) -> None:
         },
     )
     assert r.status_code == 200
-    assert "[software_engineering :: z-ai/glm-5.2 (glm)]" in r.text
+    assert "[software_engineering :: z-ai/glm-5.2]" in r.text
 
 
 def test_disabled_default(monkeypatch: pytest.MonkeyPatch) -> None:

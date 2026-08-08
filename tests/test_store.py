@@ -45,7 +45,6 @@ class TestStore:
         s = Store(":memory:")
         s.record_usage(
             session_hash="abc",
-            alias="glm",
             model="z-ai/glm-5.2",
             prompt_tokens=1000,
             completion_tokens=200,
@@ -56,7 +55,6 @@ class TestStore:
         )
         s.record_usage(
             session_hash="abc",
-            alias="glm",
             model="z-ai/glm-5.2",
             prompt_tokens=2000,
             completion_tokens=100,
@@ -77,16 +75,52 @@ class TestStore:
     def test_pin_roundtrip_and_prune(self) -> None:
         s = Store(":memory:")
         kh = hash_key("session-1")
-        s.save_pin(kh, "z-ai/glm-5.2", "glm", "software_engineering", time.time())
+        s.save_pin(kh, "z-ai/glm-5.2", "software_engineering", time.time())
         pin = s.get_pin(kh)
         assert pin is not None
         assert pin[0] == "z-ai/glm-5.2"
-        assert pin[2] == "software_engineering"
+        assert pin[1] == "software_engineering"
         # Stale pin gets pruned.
-        s.save_pin(hash_key("old"), "x", "y", "-", time.time() - 99999)
+        s.save_pin(hash_key("old"), "x", "-", time.time() - 99999)
         s.prune_pins(3600)
         assert s.get_pin(hash_key("old")) is None
         assert s.get_pin(kh) is not None
+        s.close()
+
+    def test_alias_column_migration(self) -> None:
+        """Legacy DBs carrying an alias column in usage/pins must migrate
+        cleanly to the no-alias schema without data loss."""
+        s = Store(":memory:")
+        # Simulate a legacy DB with an alias column.
+        with s._lock:
+            s._db.execute(
+                "ALTER TABLE usage ADD COLUMN alias TEXT NOT NULL DEFAULT ''"
+            )
+            s._db.execute(
+                "ALTER TABLE pins ADD COLUMN alias TEXT NOT NULL DEFAULT ''"
+            )
+            s._db.execute(
+                "INSERT INTO usage (ts, session_hash, model, prompt_tokens,"
+                " completion_tokens, cached_tokens, cost, latency_ms, status, alias)"
+                " VALUES (1.0, 'h', 'm', 10, 5, 0, 0.001, 100.0, 200, 'glm')"
+            )
+            s._db.commit()
+        s._drop_alias_column("usage")
+        s._drop_alias_column("pins")
+        cols_usage = {
+            r[1]
+            for r in s._db.execute("PRAGMA table_info(usage)").fetchall()
+        }
+        cols_pins = {
+            r[1] for r in s._db.execute("PRAGMA table_info(pins)").fetchall()
+        }
+        assert "alias" not in cols_usage
+        assert "alias" not in cols_pins
+        # Data survived the rebuild.
+        row = s._db.execute(
+            "SELECT model, prompt_tokens, status FROM usage"
+        ).fetchone()
+        assert row == ("m", 10, 200)
         s.close()
 
     def test_hash_key_is_stable_and_opaque(self) -> None:
@@ -110,9 +144,8 @@ class TestPersistentPins:
         # Fresh Router simulating a proxy restart — same store, empty memory.
         r2 = Router(cfg, store=store)
         d2 = await r2.route("continue please", session_key="persist-1")
-        assert (d2.slug, d2.alias, d2.category, d2.provider) == (
+        assert (d2.slug, d2.category, d2.provider) == (
             d1.slug,
-            d1.alias,
             d1.category,
             d1.provider,
         )
@@ -155,19 +188,44 @@ class TestPersistentPins:
         store.close()
 
 
-class TestFallbackSlug:
-    def test_default_fallback(self) -> None:
-        r = Router(ProxyConfig())
-        # fable carries a default fallback (opus) in DEFAULT_ALIAS_MAPPINGS.
-        assert r.fallback_slug("fable") == "anthropic/claude-opus-5"
+class TestRetryFallback:
+    def test_default_retry_fallback(self) -> None:
+        # SECURITY_ENGINEERING escalation model (fable) carries a default
+        # retry fallback (opus) on its Destination.
+        from smart_router_proxy.models import DEFAULT_ROUTE_TABLE, TaskClass
 
-    def test_no_fallback(self) -> None:
-        r = Router(ProxyConfig())
-        assert r.fallback_slug("glm") is None
+        escalation = DEFAULT_ROUTE_TABLE[TaskClass.SECURITY_ENGINEERING][1]
+        assert escalation.model_slug == "anthropic/claude-fable-5"
+        assert escalation.retry_fallback == "anthropic/claude-opus-5"
 
-    def test_config_override_fallback(self) -> None:
-        cfg = ProxyConfig(
-            aliases={"glm": {"model_slug": "z-ai/glm-5.2", "fallback_slug": "x/y"}}
+    def test_no_retry_fallback(self) -> None:
+        from smart_router_proxy.models import DEFAULT_ROUTE_TABLE, TaskClass
+
+        primary = DEFAULT_ROUTE_TABLE[TaskClass.SOFTWARE_ENGINEERING][0]
+        assert primary.retry_fallback is None
+
+    async def test_route_carries_retry_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A high-risk security_engineering request routes to fable and the
+        decision advertises its retry fallback (opus), which server.py uses
+        for transient-failure retries — no alias indirection required."""
+        store = Store(":memory:")
+        cfg = ProxyConfig()
+        r = Router(cfg, store=store)
+
+        risky = ClassifierResult(
+            task_class=TaskClass.SECURITY_ENGINEERING,
+            risk=RiskLevel.CRITICAL,
+            sensitivity=Sensitivity.INTERNAL,
+            confidence=0.95,
         )
-        r = Router(cfg)
-        assert r.fallback_slug("glm") == "x/y"
+        monkeypatch.setattr(
+            "smart_router_proxy.router.get_classifier",
+            lambda: type("C", (), {"classify_to_result": lambda self, t: risky})(),
+        )
+        decision = await r.route("how do I audit a malicious binary")
+        assert decision.slug == "anthropic/claude-fable-5"
+        assert decision.fallback_slug == "anthropic/claude-opus-5"
+        assert decision.provider == "openrouter"
+        store.close()

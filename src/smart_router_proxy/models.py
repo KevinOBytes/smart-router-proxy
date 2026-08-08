@@ -82,7 +82,7 @@ class EventType(enum.StrEnum):
 class ClassifierResult(BaseModel):
     """Strictly validated output from the classifier.
 
-    Must never return a provider, model alias, model slug, endpoint,
+    Must never return a provider, model slug, endpoint,
     or credential. Every field is enum-constrained. Extra fields are rejected
     to prevent prompt injection via task text.
     """
@@ -108,10 +108,10 @@ class ClassifierResult(BaseModel):
 
 
 class RouteSelection(BaseModel):
-    """The result of policy evaluation: which alias to use and why."""
+    """The result of policy evaluation: which destination to use and why."""
 
-    primary_alias: str
-    escalation_alias: str
+    primary_model: str
+    escalation_model: str
     reason_code: ReasonCode
     task_class: TaskClass
     risk: RiskLevel
@@ -123,7 +123,6 @@ class RouteSelection(BaseModel):
 class ModelPin(BaseModel):
     """A pinned concrete model for a task session."""
 
-    alias: str
     concrete_model: str
     provider: str = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"
@@ -143,8 +142,8 @@ class TelemetryEvent(BaseModel):
     event_type: EventType
     task_id: str | None = None
     session_id: str | None = None
-    primary_alias: str | None = None
-    escalation_alias: str | None = None
+    primary_model: str | None = None
+    escalation_model: str | None = None
     concrete_model: str | None = None
     reason_code: ReasonCode | None = None
     latency_ms: float | None = None
@@ -162,8 +161,8 @@ class HealthStatus(BaseModel):
     detail: str = ""
 
 
-class AliasMapping(BaseModel):
-    """Mapping from a logical alias to a concrete model destination.
+class Destination(BaseModel):
+    """A concrete model destination: provider + model slug.
 
     ``provider`` is explicit ("openrouter" or "ollama") — it is never
     inferred from the slug. OpenRouter destinations dispatch to the
@@ -171,94 +170,61 @@ class AliasMapping(BaseModel):
     loopback Ollama API.
     """
 
-    alias: str
     provider: str = "openrouter"
     model_slug: str
-    requires_tools: bool = True
-    requires_vision: bool = False
-    supports_audio: bool = False
-    """Whether the model supports audio input/output (TTS/STT)."""
-    fallback_slug: str | None = None
-    """Optional fallback when the primary slug is unavailable (e.g. fable->opus)."""
+    retry_fallback: str | None = None
+    """Optional destination slug to retry on when the primary fails
+    transiently (429/5xx). Same provider as the primary by default."""
 
 
 # ── Constants ──────────────────────────────────────────────────────────
 
 
-DEFAULT_ROUTE_TABLE: dict[TaskClass, tuple[str, str]] = {
-    TaskClass.STRUCTURED_SIMPLE: ("luna", "glm"),
-    TaskClass.AGENTIC_EXECUTION: ("deepseek_flash", "sol"),
-    TaskClass.SOFTWARE_ENGINEERING: ("glm", "opus"),
-    TaskClass.SECURITY_ENGINEERING: ("sol", "fable"),
-    TaskClass.KNOWLEDGE_REASONING: ("glm", "kimi_k3"),
-    TaskClass.WRITING_COMMUNICATION: ("sonnet", "opus"),
-    TaskClass.COMPUTER_USE: ("sonnet", "opus"),
-    TaskClass.VISUAL_FRONTEND: ("kimi_k3", "opus"),
+# Task class -> (primary destination, escalation destination).
+# The first element is used for normal/low-risk requests; the second is
+# the escalation model used on high/critical risk. Routing is fully
+# concrete — destinations are direct (provider, model) pairs, no aliases.
+DEFAULT_ROUTE_TABLE: dict[TaskClass, tuple[Destination, Destination]] = {
+    TaskClass.STRUCTURED_SIMPLE: (
+        Destination(provider="openrouter", model_slug="openai/gpt-5.6-luna"),
+        Destination(provider="openrouter", model_slug="z-ai/glm-5.2"),
+    ),
+    TaskClass.AGENTIC_EXECUTION: (
+        Destination(provider="openrouter", model_slug="deepseek/deepseek-v4-flash-0731"),
+        Destination(provider="openrouter", model_slug="openai/gpt-5.6-sol"),
+    ),
+    TaskClass.SOFTWARE_ENGINEERING: (
+        Destination(provider="openrouter", model_slug="z-ai/glm-5.2"),
+        Destination(provider="openrouter", model_slug="anthropic/claude-opus-5"),
+    ),
+    TaskClass.SECURITY_ENGINEERING: (
+        Destination(provider="openrouter", model_slug="openai/gpt-5.6-sol"),
+        Destination(
+            provider="openrouter",
+            model_slug="anthropic/claude-fable-5",
+            retry_fallback="anthropic/claude-opus-5",
+        ),
+    ),
+    TaskClass.KNOWLEDGE_REASONING: (
+        Destination(provider="openrouter", model_slug="z-ai/glm-5.2"),
+        Destination(provider="openrouter", model_slug="moonshotai/kimi-k3"),
+    ),
+    TaskClass.WRITING_COMMUNICATION: (
+        Destination(provider="openrouter", model_slug="anthropic/claude-sonnet-5"),
+        Destination(provider="openrouter", model_slug="anthropic/claude-opus-5"),
+    ),
+    TaskClass.COMPUTER_USE: (
+        Destination(provider="openrouter", model_slug="anthropic/claude-sonnet-5"),
+        Destination(provider="openrouter", model_slug="anthropic/claude-opus-5"),
+    ),
+    TaskClass.VISUAL_FRONTEND: (
+        Destination(provider="openrouter", model_slug="moonshotai/kimi-k3"),
+        Destination(provider="openrouter", model_slug="anthropic/claude-opus-5"),
+    ),
 }
 
-DEFAULT_ALIAS_MAPPINGS: dict[str, AliasMapping] = {
-    "luna": AliasMapping(
-        alias="luna",
-        model_slug="openai/gpt-5.6-luna",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=True,
-    ),
-    "deepseek_flash": AliasMapping(
-        alias="deepseek_flash",
-        model_slug="deepseek/deepseek-v4-flash-0731",
-        requires_tools=True,
-        requires_vision=False,
-        supports_audio=False,
-    ),
-    "glm": AliasMapping(
-        alias="glm",
-        model_slug="z-ai/glm-5.2",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=False,
-    ),
-    "sol": AliasMapping(
-        alias="sol",
-        model_slug="openai/gpt-5.6-sol",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=True,
-    ),
-    "sonnet": AliasMapping(
-        alias="sonnet",
-        model_slug="anthropic/claude-sonnet-5",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=False,
-    ),
-    "opus": AliasMapping(
-        alias="opus",
-        model_slug="anthropic/claude-opus-5",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=False,
-    ),
-    "fable": AliasMapping(
-        alias="fable",
-        model_slug="anthropic/claude-fable-5",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=False,
-        fallback_slug="anthropic/claude-opus-5",
-    ),
-    "kimi_k3": AliasMapping(
-        alias="kimi_k3",
-        model_slug="moonshotai/kimi-k3",
-        requires_tools=True,
-        requires_vision=True,
-        supports_audio=False,
-    ),
-    "kimi_code": AliasMapping(
-        alias="kimi_code",
-        model_slug="moonshotai/kimi-k2.7-code",
-        requires_tools=True,
-        requires_vision=False,
-        supports_audio=False,
-    ),
-}
+# Destination used when no classification is possible (empty text,
+# classifier unavailable, or a task class with no route).
+DEFAULT_DESTINATION = Destination(
+    provider="openrouter", model_slug="openai/gpt-5.6-luna"
+)

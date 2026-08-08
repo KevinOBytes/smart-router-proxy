@@ -69,16 +69,16 @@ class ProxyConfig(BaseModel):
     virtual_model: str = "smart-router"
     # Session pin TTL in seconds.
     session_ttl_seconds: int = 3600
-    # alias -> {model_slug: str} overrides (same shape as the plugin).
-    aliases: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    # task class -> {"primary_alias": str, "fallback_alias": str} overrides.
+    # task class -> direct destination overrides:
+    #   {"primary": {"provider": "openrouter", "model": "<slug>"},
+    #    "fallback": {"provider": "openrouter", "model": "<slug>"} | None}
     # Control-panel managed; overrides DEFAULT_ROUTE_TABLE for that class.
-    # Entries may also carry direct destinations:
-    #   {"primary": {"provider": "openrouter", "model": "<slug>"}, "fallback": {...}}
     route_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # mode: active | fixed
     mode: str = "active"
-    fixed_alias: str = "luna"
+    # Fixed mode always routes to this concrete destination.
+    fixed_slug: str = "openai/gpt-5.6-luna"
+    fixed_provider: str = "openrouter"
     # SQLite ledger (usage accounting + pin persistence). ":memory:" for tests.
     store_path: str = "~/.smart-router-proxy/state.db"
     # Optionally prepend a visible routing tag ("[category :: model]") to

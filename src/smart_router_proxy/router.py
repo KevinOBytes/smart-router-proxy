@@ -1,9 +1,9 @@
-"""Request router: classify → destination (provider + concrete model).
+"""Request router: classify → concrete destination (provider + model slug).
 
-Reuses the hermes-smart-router package for the default route table and
-alias mappings so proxy and plugin stay in lockstep. Control-panel route
-overrides may pin direct (provider, model) destinations for any task
-class, so the full OpenRouter and Ollama catalogs are routable.
+Routing is fully concrete — no alias layer. The route table maps each task
+class to a pair of explicit (provider, model) destinations; control-panel
+overrides pin direct destinations for any task class, so the full
+OpenRouter and Ollama catalogs are routable.
 """
 
 from __future__ import annotations
@@ -17,26 +17,21 @@ from typing import Any, Final
 from smart_router_proxy.bert_classifier import get_classifier
 from smart_router_proxy.config import ProxyConfig
 from smart_router_proxy.models import (
-    DEFAULT_ALIAS_MAPPINGS,
+    DEFAULT_DESTINATION,
     DEFAULT_ROUTE_TABLE,
     ClassifierResult,
+    Destination,
 )
 from smart_router_proxy.store import Store, hash_key
 
 logger = logging.getLogger(__name__)
 
-FALLBACK_ALIAS = "luna"
-
-# Logical alias used for control-panel direct destinations (no alias exists).
-DIRECT_ALIAS = "custom"
-
-# Pin tuple layout: (slug, alias, category, provider, fallback_slug, fallback_provider, pinned_at)
+# Pin tuple layout: (slug, category, provider, fallback_slug, fallback_provider, pinned_at)
 # Final so mypy resolves tuple indexing to the exact element type.
-PIN_ALIAS: Final = 1
-PIN_PROVIDER: Final = 3
-PIN_FALLBACK_SLUG: Final = 4
-PIN_FALLBACK_PROVIDER: Final = 5
-PIN_PINNED_AT: Final = 6
+PIN_PROVIDER: Final = 2
+PIN_FALLBACK_SLUG: Final = 3
+PIN_FALLBACK_PROVIDER: Final = 4
+PIN_PINNED_AT: Final = 5
 
 
 @dataclass
@@ -49,16 +44,11 @@ class RouteDecision:
     """
 
     slug: str
-    alias: str
     category: str
     provider: str = "openrouter"
     fallback_slug: str | None = None
     fallback_provider: str | None = None
-
-    @property
-    def routed(self) -> bool:
-        """True when this decision came from routing (not a passthrough)."""
-        return self.alias != "-"
+    routed: bool = True
 
 
 class Router:
@@ -67,9 +57,8 @@ class Router:
     def __init__(self, config: ProxyConfig, store: Store | None = None) -> None:
         self._config = config
         self._lock = threading.Lock()
-        # session key -> (slug, alias, category, provider, fallback_slug,
-        #                 fallback_provider, pinned_at)
-        self._pins: dict[str, tuple[str, str, str, str, str | None, str | None, float]] = {}
+        # session key -> (slug, category, provider, fallback_slug, fallback_provider, pinned_at)
+        self._pins: dict[str, tuple[str, str, str, str | None, str | None, float]] = {}
         self._store = store
 
     async def route(
@@ -83,7 +72,10 @@ class Router:
         cfg = self._config
 
         if cfg.mode == "fixed":
-            return self._decision_for_alias(cfg.fixed_alias, "-")
+            return self._decision_for_destination(
+                Destination(provider=cfg.fixed_provider, model_slug=cfg.fixed_slug),
+                "-",
+            )
 
         # Session pin: sliding TTL — every hit refreshes the pin so an active
         # conversation never re-routes mid-stream. A mid-conversation model
@@ -104,7 +96,6 @@ class Router:
                         pin[2],
                         pin[3],
                         pin[4],
-                        pin[5],
                         now,
                     )
                     self._pins[session_key] = refreshed
@@ -112,20 +103,18 @@ class Router:
                         self._store.save_pin(
                             hash_key(session_key),
                             slug=pin[0],
-                            alias=pin[1],
-                            category=pin[2],
+                            category=pin[1],
                             pinned_at=now,
-                            provider=pin[3],
-                            fallback_slug=pin[4],
-                            fallback_provider=pin[5],
+                            provider=pin[2],
+                            fallback_slug=pin[3],
+                            fallback_provider=pin[4],
                         )
                     return RouteDecision(
                         slug=pin[0],
-                        alias=pin[1],
-                        category=pin[2],
-                        provider=pin[3],
-                        fallback_slug=pin[4],
-                        fallback_provider=pin[5],
+                        category=pin[1],
+                        provider=pin[2],
+                        fallback_slug=pin[3],
+                        fallback_provider=pin[4],
                     )
 
         decision = await self._classify_decision(text)
@@ -140,7 +129,6 @@ class Router:
                     }
                 self._pins[session_key] = (
                     decision.slug,
-                    decision.alias,
                     decision.category,
                     decision.provider,
                     decision.fallback_slug,
@@ -151,7 +139,6 @@ class Router:
                 self._store.save_pin(
                     hash_key(session_key),
                     slug=decision.slug,
-                    alias=decision.alias,
                     category=decision.category,
                     pinned_at=now,
                     provider=decision.provider,
@@ -159,11 +146,6 @@ class Router:
                     fallback_provider=decision.fallback_provider,
                 )
         return decision
-
-    def fallback_slug(self, alias: str) -> str | None:
-        """Return the configured fallback slug for an alias, if any."""
-        fb = self._fallback_for_alias(alias)
-        return fb[1] if fb else None
 
     def clear_pin_by_hash(self, key_hash: str) -> bool:
         """Remove a pin by its opaque hash from memory and the store.
@@ -191,7 +173,7 @@ class Router:
     async def _classify_decision(self, text: str) -> RouteDecision:
         """Return the RouteDecision for the given text."""
         if not text:
-            return self._decision_for_alias(FALLBACK_ALIAS, "-")
+            return self._default_decision("-")
 
         try:
             bert = get_classifier()
@@ -201,7 +183,7 @@ class Router:
         except Exception as exc:
             logger.debug("BERT classifier unavailable: %s", exc)
 
-        return self._decision_for_alias(FALLBACK_ALIAS, "-")
+        return self._default_decision("-")
 
     def _apply_route(self, result: ClassifierResult) -> RouteDecision:
         """Map a ClassifierResult to a RouteDecision.
@@ -213,7 +195,7 @@ class Router:
         """
         category = result.task_class.value
         if result.confidence < self._config.classifier.confidence_threshold:
-            return self._decision_for_alias(FALLBACK_ALIAS, category)
+            return self._default_decision(category)
 
         override = self._config.route_overrides.get(category)
         if override and isinstance(override.get("primary"), dict):
@@ -225,79 +207,42 @@ class Router:
                     and isinstance(fallback, dict)
                     and fallback.get("model")
                 ):
-                    return RouteDecision(
-                        slug=str(fallback["model"]),
-                        alias=DIRECT_ALIAS,
-                        category=category,
-                        provider=str(fallback.get("provider", "openrouter")),
+                    return self._decision_for_destination(
+                        Destination(
+                            provider=str(fallback.get("provider", "openrouter")),
+                            model_slug=str(fallback["model"]),
+                        ),
+                        category,
                     )
-                return RouteDecision(
-                    slug=str(primary["model"]),
-                    alias=DIRECT_ALIAS,
-                    category=category,
-                    provider=str(primary.get("provider", "openrouter")),
+                return self._decision_for_destination(
+                    Destination(
+                        provider=str(primary.get("provider", "openrouter")),
+                        model_slug=str(primary["model"]),
+                    ),
+                    category,
                 )
-        # Alias-form override (written by /config/routing and the /ui when
-        # both slots are built-in aliases): honor the configured primary
-        # alias (and escalate to the configured fallback alias on
-        # high/critical risk), falling back to the built-in defaults for
-        # any slot the override leaves unset.
-        if override and not isinstance(override.get("primary"), dict):
-            default_primary, default_fallback = DEFAULT_ROUTE_TABLE[result.task_class]
-            primary_alias = str(override.get("primary_alias") or default_primary)
-            fallback_alias = str(override.get("fallback_alias") or default_fallback)
-            if result.risk.value in ("high", "critical"):
-                return self._decision_for_alias(fallback_alias, category)
-            return self._decision_for_alias(primary_alias, category)
 
         route = DEFAULT_ROUTE_TABLE.get(result.task_class)
         if route is None:
-            return self._decision_for_alias(FALLBACK_ALIAS, category)
-        alias = str(route[1]) if result.risk.value in ("high", "critical") else str(route[0])
-        return self._decision_for_alias(alias, category)
+            return self._default_decision(category)
+        destination = route[1] if result.risk.value in ("high", "critical") else route[0]
+        return self._decision_for_destination(destination, category)
 
-    def _decision_for_alias(self, alias: str, category: str) -> RouteDecision:
-        """Build a RouteDecision for a logical alias (with fallback info)."""
-        provider, slug = self._resolve_alias(alias)
-        fb = self._fallback_for_alias(alias)
+    def _default_decision(self, category: str) -> RouteDecision:
+        """Decision for unclassifiable text: the default destination."""
+        return self._decision_for_destination(DEFAULT_DESTINATION, category)
+
+    def _decision_for_destination(
+        self, destination: Destination, category: str
+    ) -> RouteDecision:
+        """Build a RouteDecision for a concrete destination."""
         return RouteDecision(
-            slug=slug,
-            alias=alias,
+            slug=destination.model_slug,
             category=category,
-            provider=provider,
-            fallback_slug=fb[1] if fb else None,
-            fallback_provider=fb[0] if fb else None,
+            provider=destination.provider,
+            fallback_slug=destination.retry_fallback,
+            fallback_provider=destination.provider if destination.retry_fallback else None,
         )
-
-    def _resolve_alias(self, alias: str) -> tuple[str, str]:
-        """Return (provider, slug) for an alias, honoring config overrides."""
-        overrides = self._config.aliases
-        if alias in overrides:
-            entry = overrides[alias]
-            if isinstance(entry, dict):
-                slug = entry.get("model_slug")
-                if slug:
-                    provider = entry.get("provider", "openrouter")
-                    return str(provider), str(slug)
-        mapping = DEFAULT_ALIAS_MAPPINGS.get(alias)
-        if mapping is not None:
-            return str(mapping.provider), str(mapping.model_slug)
-        return "openrouter", str(DEFAULT_ALIAS_MAPPINGS[FALLBACK_ALIAS].model_slug)
-
-    def _fallback_for_alias(self, alias: str) -> tuple[str, str] | None:
-        """Return (provider, slug) fallback for an alias, if any."""
-        overrides = self._config.aliases
-        if alias in overrides:
-            entry = overrides[alias]
-            if isinstance(entry, dict):
-                fb = entry.get("fallback_slug")
-                if fb:
-                    fb_provider = entry.get("fallback_provider", "openrouter")
-                    return str(fb_provider), str(fb)
-        mapping = DEFAULT_ALIAS_MAPPINGS.get(alias)
-        if mapping is not None and mapping.fallback_slug:
-            return "openrouter", str(mapping.fallback_slug)
-        return None
 
 
 def extract_user_text(messages: list[dict[str, Any]]) -> str:

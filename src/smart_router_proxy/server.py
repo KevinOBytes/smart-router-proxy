@@ -65,8 +65,10 @@ def create_app(
             timeout=cfg.ollama.timeout_seconds,
         )
         yield
-        await app.state.http.aclose()
-        await app.state.ollama_http.aclose()
+        for client_attr in ("http", "ollama_http"):
+            c = getattr(app.state, client_attr, None)
+            if isinstance(c, httpx.AsyncClient):
+                await c.aclose()
         store.close()
 
     app = FastAPI(title="smart-router-proxy", lifespan=lifespan)
@@ -165,7 +167,6 @@ def create_app(
         payload: dict[str, Any],
         *,
         session_key: str | None,
-        alias: str,
         model: str,
         started: float,
         status: int,
@@ -175,7 +176,6 @@ def create_app(
             usage = parse_usage(payload) or {}
             store.record_usage(
                 session_hash=hash_key(session_key) if session_key else "-",
-                alias=alias,
                 model=model,
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
@@ -187,7 +187,7 @@ def create_app(
         except Exception as exc:
             logger.debug("usage recording failed: %s", exc)
 
-    def _annotate_content(content: str, model: str, alias: str, category: str) -> str:
+    def _annotate_content(content: str, model: str, category: str) -> str:
         """Prepend a visible 'category :: model' note to assistant content.
 
         The response body's ``model`` field is rewritten to the routed slug
@@ -195,7 +195,7 @@ def create_app(
         need to see which category and model answered. Only applied when
         ``annotate_response`` is enabled.
         """
-        return f"[{category} :: {model} ({alias})]\n{content}"
+        return f"[{category} :: {model}]\n{content}"
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Any:
@@ -220,65 +220,80 @@ def create_app(
         )
 
         # Route only the virtual model; pass real model names through untouched.
-        routed_alias = "-"
+        is_routed = False
+        routed_provider = "openrouter"
         routed_slug = ""
         routed_category = "-"
         routed_fallback: str | None = None
         if requested_model in (cfg.virtual_model, f"tko/{cfg.virtual_model}"):
             text = extract_user_text(messages)
             decision = await router.route(text, session_key)
+            is_routed = True
             routed_slug = decision.slug
-            routed_alias = decision.alias
             routed_category = decision.category
             routed_fallback = decision.fallback_slug
+            routed_provider = decision.provider
             body["model"] = routed_slug
-            # Inject classification metadata so downstream tracing (LiteLLM →
-            # Langfuse) records the routing decision in the trace.
+            # Inject classification metadata so downstream tracing records the
+            # routing decision in the trace.
             existing_meta = body.get("metadata")
             if not isinstance(existing_meta, dict):
                 existing_meta = {}
             existing_meta.setdefault("task_class", routed_category)
-            existing_meta.setdefault("router_alias", routed_alias)
             existing_meta.setdefault("router_slug", routed_slug)
             body["metadata"] = existing_meta
             # OpenRouter sticky routing: pin this conversation to the same
             # upstream backend so provider-side prompt caches keep hitting.
-            if session_key and "session_id" not in body:
+            if routed_provider == "openrouter" and session_key and "session_id" not in body:
                 body["session_id"] = session_key
             logger.info(
-                "routed request_id=%s alias=%s category=%s model=%s",
+                "routed request_id=%s category=%s provider=%s model=%s",
                 uuid.uuid4().hex[:8],
-                routed_alias,
                 routed_category,
+                routed_provider,
                 routed_slug,
             )
 
         headers = _upstream_headers()
-        if routed_alias != "-":
+        if is_routed:
             # LiteLLM's Langfuse callback reads trace metadata from these
             # request headers. Keep LiteLLM as the sole Langfuse sender while
-            # preserving the classifier decision in its one trace.
+            # preserving the classifier decision in its one trace. This is
+            # only meaningful for the OpenRouter path.
             headers["langfuse_trace_metadata"] = json.dumps(
                 {
                     "task_class": routed_category,
-                    "router_alias": routed_alias,
                     "router_slug": routed_slug,
                 }
             )
             headers["langfuse_generation_name"] = "smart-router-proxy"
         stream = bool(body.get("stream"))
-        http: httpx.AsyncClient = request.app.state.http
         started = time.time()
 
+        # Select the dispatch target by provider: OpenRouter uses the proxy's
+        # own key; native Ollama is a loopback OpenAI-compatible endpoint with
+        # no auth. Every routed request dispatches here — never to the wrong
+        # provider.
+        if routed_provider == "ollama":
+            ollama_http: httpx.AsyncClient | None = _ollama_client()
+            if ollama_http is None:
+                raise HTTPException(status_code=502, detail="Ollama client unavailable")
+            client: httpx.AsyncClient = ollama_http
+            url_path = "/v1/chat/completions"
+            dispatch_headers: dict[str, str] = {}
+        else:
+            client = request.app.state.http
+            url_path = "/chat/completions"
+            dispatch_headers = headers
+
         if not stream:
-            resp = await http.post("/chat/completions", json=body, headers=headers)
+            resp = await client.post(url_path, json=body, headers=dispatch_headers)
             # One retry on the fallback slug for transient upstream failures
-            # (429 / 5xx). Only for routed requests with a fallback — either
-            # the alias's configured fallback or the decision's direct one.
+            # (429 / 5xx). Only for routed requests with a fallback.
             if resp.status_code in _RETRYABLE and (
-                routed_alias != "-" or routed_fallback is not None
+                is_routed and routed_fallback
             ):
-                fb = routed_fallback or router.fallback_slug(routed_alias)
+                fb = routed_fallback
                 if fb and fb != body.get("model"):
                     logger.warning(
                         "upstream %s on %s — retrying on fallback %s",
@@ -287,25 +302,22 @@ def create_app(
                         fb,
                     )
                     body["model"] = fb
-                    resp = await http.post(
-                        "/chat/completions", json=body, headers=headers
-                    )
+                    resp = await client.post(url_path, json=body, headers=dispatch_headers)
             payload = resp.json()
             _record(
                 payload,
                 session_key=session_key,
-                alias=routed_alias,
                 model=str(body.get("model", "")),
                 started=started,
                 status=resp.status_code,
             )
-            if routed_alias != "-" and cfg.annotate_response:
+            if is_routed and cfg.annotate_response:
                 try:
                     msg = payload.get("choices", [{}])[0].get("message") or {}
                     content = msg.get("content")
                     if isinstance(content, str):
                         msg["content"] = _annotate_content(
-                            content, routed_slug, routed_alias, routed_category
+                            content, routed_slug, routed_category
                         )
                 except Exception as exc:
                     logger.debug("content annotation failed: %s", exc)
@@ -323,13 +335,13 @@ def create_app(
             status = 0
             buffer = b""
             first = True
-            async with http.stream(
-                "POST", "/chat/completions", json=body, headers=headers
+            async with client.stream(
+                "POST", url_path, json=body, headers=dispatch_headers
             ) as upstream:
                 status = upstream.status_code
                 async for chunk in upstream.aiter_bytes():
                     buffer = (buffer + chunk)[-16384:]  # tail only, for usage
-                    if first and routed_alias != "-" and status == 200 and cfg.annotate_response:
+                    if first and is_routed and status == 200 and cfg.annotate_response:
                         first = False
                         try:
                             note = json.dumps(
@@ -345,7 +357,7 @@ def create_app(
                                                 "role": "assistant",
                                                 "content": (
                                                     f"[{routed_category} :: "
-                                                    f"{routed_slug} ({routed_alias})]\n"
+                                                    f"{routed_slug}]\n"
                                                 ),
                                             },
                                             "finish_reason": None,
@@ -372,7 +384,6 @@ def create_app(
             _record(
                 usage_payload,
                 session_key=session_key,
-                alias=routed_alias,
                 model=str(body.get("model", "")),
                 started=started,
                 status=status,

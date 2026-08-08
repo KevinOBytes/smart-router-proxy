@@ -147,13 +147,7 @@ function matchesFilter(text) {
   return text.toLowerCase().includes(f);
 }
 
-function aliasDest(alias) {
-  if (!state || !state.routing.length) return null;
-  return state.routing[0].destinations.find((d) => d.alias === alias) || null;
-}
-
-/* Build a <select> whose options are:
-   - built-in aliases (value = alias name)
+/* Build a <select> whose options are the live catalogs:
    - full OpenRouter catalog (value = "openrouter::<id>", filtered)
    - installed Ollama models (value = "ollama::<id>", filtered) */
 function modelSelect(taskClass, slot, current) {
@@ -161,22 +155,13 @@ function modelSelect(taskClass, slot, current) {
   select.dataset.task = taskClass;
   select.dataset.slot = slot;
 
-  const aliases = new Map();
-  for (const dest of state.routing[0].destinations) {
-    aliases.set(dest.alias, `${dest.alias} — ${dest.provider}:${dest.model_slug}`);
-  }
   const orModels = catalog.openrouter.models || [];
   const olModels = catalog.ollama.models || [];
 
-  const groupAliases = document.createElement("optgroup");
-  groupAliases.label = "Built-in aliases";
-  for (const [alias, label] of aliases) {
-    const opt = document.createElement("option");
-    opt.value = alias;
-    opt.textContent = label;
-    groupAliases.appendChild(opt);
-  }
-  select.appendChild(groupAliases);
+  const optDefault = document.createElement("option");
+  optDefault.value = "";
+  optDefault.textContent = "— select model —";
+  select.appendChild(optDefault);
 
   if (orModels.length) {
     const group = document.createElement("optgroup");
@@ -205,61 +190,37 @@ function modelSelect(taskClass, slot, current) {
   }
 
   // Select the current destination if it maps to an option.
-  if (current) {
-    if (current.kind === "direct") {
-      const v = `${current.provider}::${current.model_slug}`;
-      if ([...select.options].some((o) => o.value === v)) select.value = v;
-    } else if (aliases.has(current.alias)) {
-      select.value = current.alias;
-    }
-  }
-  if (!select.value) {
-    // Fall back to the first alias so the picker always has a value.
-    select.value = [...aliases.keys()][0] || "";
+  if (current && current.kind === "direct") {
+    const v = `${current.provider}::${current.model_slug}`;
+    if ([...select.options].some((o) => o.value === v)) select.value = v;
   }
   return select;
 }
 
-/* Parse a select value into {provider, model} — aliases resolve through
-   the state destinations list, catalog picks carry "provider::model". */
+/* Parse a select value into {provider, model} — "provider::model". */
 function parsePick(value) {
   if (!value) return null;
   const idx = value.indexOf("::");
-  if (idx !== -1) {
-    return { provider: value.slice(0, idx), model: value.slice(idx + 2) };
-  }
-  const d = aliasDest(value);
-  return d ? { provider: d.provider, model: d.model_slug } : null;
+  if (idx === -1) return null;
+  return { provider: value.slice(0, idx), model: value.slice(idx + 2) };
 }
 
 async function saveRouting(taskClass, btn) {
   const primarySel = document.querySelector(`select[data-task="${taskClass}"][data-slot="primary"]`);
   const fallbackSel = document.querySelector(`select[data-task="${taskClass}"][data-slot="fallback"]`);
-  const pVal = primarySel.value;
-  const fVal = fallbackSel.value;
+  const primary = parsePick(primarySel.value);
+  const fallback = fallbackSel.value ? parsePick(fallbackSel.value) : null;
+  if (!primary) {
+    toast("Pick a primary model first", "err");
+    return;
+  }
 
   btn.disabled = true;
   try {
-    if (!pVal.includes("::") && !fVal.includes("::")) {
-      // Both slots are built-in aliases — use the alias endpoint so
-      // reverting to defaults drops the override cleanly.
-      await api("/api/admin/config/routing", {
-        method: "PATCH",
-        body: JSON.stringify({
-          task_class: taskClass,
-          primary_alias: pVal,
-          fallback_alias: fVal,
-        }),
-      });
-    } else {
-      const primary = parsePick(pVal);
-      const fallback = fVal ? parsePick(fVal) : null;
-      if (!primary) throw new Error("Could not resolve primary destination");
-      await api("/api/admin/config/routing/direct", {
-        method: "PATCH",
-        body: JSON.stringify({ task_class: taskClass, primary, fallback }),
-      });
-    }
+    await api("/api/admin/config/routing", {
+      method: "PATCH",
+      body: JSON.stringify({ task_class: taskClass, primary, fallback }),
+    });
     toast(`Routing updated for ${taskClass}`);
     await loadState();
   } catch (err) {
@@ -305,7 +266,6 @@ async function classify() {
     const out = $("classify-result");
     out.textContent =
       `task_class : ${res.task_class}\n` +
-      `alias      : ${res.alias}\n` +
       `provider   : ${res.provider}\n` +
       `model_slug : ${res.model_slug}\n` +
       `note       : ${res.note}`;
@@ -322,7 +282,8 @@ async function classify() {
 function renderBehavior() {
   const b = state.behavior;
   $("mode").value = b.mode;
-  $("fixed-alias").value = b.fixed_alias;
+  $("fixed-provider").value = b.fixed_provider;
+  $("fixed-slug").value = b.fixed_slug;
   $("annotate").checked = b.annotate_response;
   $("session-ttl").value = b.session_ttl_seconds;
   $("virtual-model-label").textContent = `virtual model: ${b.virtual_model} (read-only)`;
@@ -334,7 +295,8 @@ async function saveBehavior() {
       method: "PATCH",
       body: JSON.stringify({
         mode: $("mode").value,
-        fixed_alias: $("fixed-alias").value.trim(),
+        fixed_slug: $("fixed-slug").value.trim(),
+        fixed_provider: $("fixed-provider").value,
         annotate_response: $("annotate").checked,
         session_ttl_seconds: parseInt($("session-ttl").value, 10),
       }),
@@ -386,7 +348,7 @@ async function loadPins() {
     body.innerHTML = "";
     if (!res.pins.length) {
       // Static constant string only — no interpolated data (XSS-safe).
-      body.innerHTML = '<tr><td colspan="6" class="muted">No active pins.</td></tr>';
+      body.innerHTML = '<tr><td colspan="5" class="muted">No active pins.</td></tr>';
       return;
     }
     for (const pin of res.pins) {
@@ -394,9 +356,6 @@ async function loadPins() {
       const tdId = document.createElement("td");
       tdId.className = "mono";
       tdId.textContent = pin.id;
-      const tdAlias = document.createElement("td");
-      tdAlias.className = "mono";
-      tdAlias.textContent = pin.alias;
       const tdSlug = document.createElement("td");
       tdSlug.className = "mono";
       tdSlug.textContent = pin.slug;
@@ -412,7 +371,7 @@ async function loadPins() {
       btn.textContent = "Clear";
       btn.addEventListener("click", () => clearPin(pin.id));
       tdBtn.appendChild(btn);
-      tr.append(tdId, tdAlias, tdSlug, tdCat, tdTime, tdBtn);
+      tr.append(tdId, tdSlug, tdCat, tdTime, tdBtn);
       body.appendChild(tr);
     }
   } catch (err) {

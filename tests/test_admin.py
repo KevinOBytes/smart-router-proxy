@@ -44,7 +44,21 @@ def _mock_upstream(client: TestClient, *, models: bool = True) -> None:
                             "context_length": 128000,
                             "pricing": {"prompt": "0.5", "completion": "1.5"},
                             "modality": ["text", "image"],
-                        }
+                        },
+                        {
+                            "id": "z-ai/glm-5.2",
+                            "name": "GLM 5.2",
+                            "context_length": 128000,
+                            "pricing": {"prompt": "0.5", "completion": "1.5"},
+                            "modality": ["text"],
+                        },
+                        {
+                            "id": "anthropic/claude-opus-5",
+                            "name": "Claude Opus 5",
+                            "context_length": 200000,
+                            "pricing": {"prompt": "3", "completion": "15"},
+                            "modality": ["text", "image"],
+                        },
                     ]
                 },
             )
@@ -145,7 +159,7 @@ def test_catalog_refresh_degrades_independently(app: TestClient) -> None:
     res = app.post("/api/admin/catalog/refresh")
     assert res.status_code == 200
     body = res.json()
-    assert len(body["openrouter"]["models"]) == 1
+    assert len(body["openrouter"]["models"]) == 3
     assert body["ollama"]["models"] == []
     assert body["ollama"]["error"] is not None
 
@@ -173,17 +187,27 @@ def test_classify_only_rejects_empty_text(app: TestClient) -> None:
 # ── Mutations ─────────────────────────────────────────────────────────
 
 
+def _seed_catalog(app: TestClient) -> None:
+    _mock_upstream(app)
+    _mock_ollama(app)
+    res = app.post("/api/admin/catalog/refresh")
+    assert res.status_code == 200
+
+
 def test_routing_update_applies_and_persists(app: TestClient, tmp_path: Path) -> None:
+    _seed_catalog(app)
     payload = {
         "task_class": "software_engineering",
-        "primary_alias": "sonnet",
-        "fallback_alias": "opus",
+        "primary": {"provider": "openrouter", "model": "org/mock-model"},
+        "fallback": {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"},
     }
     res = app.patch("/api/admin/config/routing", json=payload)
     assert res.status_code == 200
     row = next(r for r in res.json()["routing"] if r["task_class"] == "software_engineering")
-    assert row["primary_alias"] == "sonnet"
-    assert row["fallback_alias"] == "opus"
+    assert row["primary"]["provider"] == "openrouter"
+    assert row["primary"]["model_slug"] == "org/mock-model"
+    assert row["fallback"]["provider"] == "ollama"
+    assert row["fallback"]["model_slug"] == "qwen3.6:35b-a3b-q4_K_M"
     assert row["overridden"] is True
 
     # Persisted atomically: a fresh app on the same config file sees it.
@@ -191,25 +215,29 @@ def test_routing_update_applies_and_persists(app: TestClient, tmp_path: Path) ->
     with TestClient(fresh) as client:
         state = client.get("/api/admin/state").json()
         row = next(r for r in state["routing"] if r["task_class"] == "software_engineering")
-        assert row["primary_alias"] == "sonnet"
+        assert row["primary"]["model_slug"] == "org/mock-model"
+        assert row["overridden"] is True
 
 
 def test_routing_revert_to_default_drops_override(
     app: TestClient, tmp_path: Path
 ) -> None:
-    payload = {
-        "task_class": "software_engineering",
-        "primary_alias": "sonnet",
-        "fallback_alias": "opus",
-    }
-    app.patch("/api/admin/config/routing", json=payload)
+    _seed_catalog(app)
+    app.patch(
+        "/api/admin/config/routing",
+        json={
+            "task_class": "software_engineering",
+            "primary": {"provider": "openrouter", "model": "org/mock-model"},
+            "fallback": None,
+        },
+    )
 
     # Revert to the built-in defaults: the override must be dropped, so the
     # matrix reports "default" and nothing persists to disk.
     defaults = {
         "task_class": "software_engineering",
-        "primary_alias": "glm",
-        "fallback_alias": "opus",
+        "primary": {"provider": "openrouter", "model": "z-ai/glm-5.2"},
+        "fallback": {"provider": "openrouter", "model": "anthropic/claude-opus-5"},
     }
     res = app.patch("/api/admin/config/routing", json=defaults)
     assert res.status_code == 200
@@ -231,7 +259,11 @@ def test_routing_revert_to_default_drops_override(
 def test_routing_update_rejects_unknown_class(app: TestClient) -> None:
     res = app.patch(
         "/api/admin/config/routing",
-        json={"task_class": "not_a_class", "primary_alias": "luna", "fallback_alias": "glm"},
+        json={
+            "task_class": "not_a_class",
+            "primary": {"provider": "openrouter", "model": "x/y"},
+            "fallback": None,
+        },
     )
     assert res.status_code == 422
 
@@ -241,64 +273,31 @@ def test_routing_update_rejects_extra_fields(app: TestClient) -> None:
         "/api/admin/config/routing",
         json={
             "task_class": "software_engineering",
-            "primary_alias": "luna",
-            "fallback_alias": "glm",
+            "primary": {"provider": "openrouter", "model": "x/y"},
+            "fallback": None,
             "sneaky": "x",
         },
     )
     assert res.status_code == 422
 
 
-# ── Direct destinations (full catalog) ──────────────────────────────────
-
-
-def _seed_catalog(app: TestClient) -> None:
-    _mock_upstream(app)
-    _mock_ollama(app)
-    res = app.post("/api/admin/catalog/refresh")
-    assert res.status_code == 200
-
-
-def test_direct_routing_update_applies_and_persists(
-    app: TestClient, tmp_path: Path
-) -> None:
+def test_routing_update_rejects_bad_provider(app: TestClient) -> None:
     _seed_catalog(app)
     res = app.patch(
-        "/api/admin/config/routing/direct",
+        "/api/admin/config/routing",
         json={
             "task_class": "software_engineering",
-            "primary": {"provider": "openrouter", "model": "org/mock-model"},
-            "fallback": {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"},
+            "primary": {"provider": "azure", "model": "x/y"},
+            "fallback": None,
         },
     )
-    assert res.status_code == 200
-    body = res.json()
-    row = next(
-        r for r in body["routing"] if r["task_class"] == "software_engineering"
-    )
-    assert row["overridden"] is True
-    assert row["primary"]["kind"] == "direct"
-    assert row["primary"]["provider"] == "openrouter"
-    assert row["primary"]["model_slug"] == "org/mock-model"
-    assert row["fallback"]["provider"] == "ollama"
-    assert row["fallback"]["model_slug"] == "qwen3.6:35b-a3b-q4_K_M"
-
-    # Persisted: a fresh app on the same config file sees the direct route.
-    fresh = create_app(config_path=tmp_path / "config.yaml")
-    with TestClient(fresh) as client:
-        row = next(
-            r
-            for r in client.get("/api/admin/state").json()["routing"]
-            if r["task_class"] == "software_engineering"
-        )
-        assert row["primary"]["kind"] == "direct"
-        assert row["primary"]["model_slug"] == "org/mock-model"
+    assert res.status_code == 422
 
 
-def test_direct_routing_update_rejects_unknown_model(app: TestClient) -> None:
+def test_routing_update_rejects_unknown_model(app: TestClient) -> None:
     _seed_catalog(app)
     res = app.patch(
-        "/api/admin/config/routing/direct",
+        "/api/admin/config/routing",
         json={
             "task_class": "software_engineering",
             "primary": {"provider": "openrouter", "model": "org/not-in-catalog"},
@@ -309,11 +308,11 @@ def test_direct_routing_update_rejects_unknown_model(app: TestClient) -> None:
     assert "not in the catalog" in res.json()["detail"]
 
 
-def test_direct_routing_update_fails_closed_without_catalog(app: TestClient) -> None:
+def test_routing_update_fails_closed_without_catalog(app: TestClient) -> None:
     # No catalog refresh happened — even a valid-looking model must be
     # rejected because it cannot be proven selectable.
     res = app.patch(
-        "/api/admin/config/routing/direct",
+        "/api/admin/config/routing",
         json={
             "task_class": "software_engineering",
             "primary": {"provider": "openrouter", "model": "org/anything"},
@@ -323,25 +322,13 @@ def test_direct_routing_update_fails_closed_without_catalog(app: TestClient) -> 
     assert res.status_code == 400
 
 
-def test_direct_routing_update_rejects_bad_provider(app: TestClient) -> None:
-    _seed_catalog(app)
-    res = app.patch(
-        "/api/admin/config/routing/direct",
-        json={
-            "task_class": "software_engineering",
-            "primary": {"provider": "azure", "model": "x/y"},
-            "fallback": None,
-        },
-    )
-    assert res.status_code == 422
-
-
 def test_behavior_update_roundtrip(app: TestClient, tmp_path: Path) -> None:
     res = app.patch(
         "/api/admin/config/behavior",
         json={
             "mode": "fixed",
-            "fixed_alias": "sonnet",
+            "fixed_slug": "anthropic/claude-sonnet-5",
+            "fixed_provider": "openrouter",
             "annotate_response": True,
             "session_ttl_seconds": 7200,
         },
@@ -349,7 +336,8 @@ def test_behavior_update_roundtrip(app: TestClient, tmp_path: Path) -> None:
     assert res.status_code == 200
     b = res.json()["behavior"]
     assert b["mode"] == "fixed"
-    assert b["fixed_alias"] == "sonnet"
+    assert b["fixed_slug"] == "anthropic/claude-sonnet-5"
+    assert b["fixed_provider"] == "openrouter"
     assert b["annotate_response"] is True
     assert b["session_ttl_seconds"] == 7200
 
@@ -363,7 +351,8 @@ def test_behavior_update_rejects_invalid_mode(app: TestClient) -> None:
         "/api/admin/config/behavior",
         json={
             "mode": "shadow",
-            "fixed_alias": "luna",
+            "fixed_slug": "x/y",
+            "fixed_provider": "openrouter",
             "annotate_response": False,
             "session_ttl_seconds": 3600,
         },
@@ -428,7 +417,7 @@ def test_pins_list_and_clear(app: TestClient) -> None:
     # Upstream is not mocked here; any status is fine — the pin is created
     # before the upstream call. Assert via the admin surface instead.
     pins = app.get("/api/admin/pins").json()["pins"]
-    assert any(p["alias"] != "-" for p in pins)
+    assert any(p["slug"] != "" for p in pins)
 
     if pins:
         pid = pins[0]["id"]

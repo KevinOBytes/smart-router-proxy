@@ -6,7 +6,7 @@ import pytest
 
 from smart_router_proxy.config import ProxyConfig
 from smart_router_proxy.models import ClassifierResult, RiskLevel, Sensitivity, TaskClass
-from smart_router_proxy.router import FALLBACK_ALIAS, Router, extract_user_text
+from smart_router_proxy.router import DEFAULT_DESTINATION, Router, extract_user_text
 
 
 @pytest.fixture()
@@ -64,7 +64,6 @@ class TestRouting:
         decision = await router.route(
             "Fix the failing pytest suite in my Python repo and refactor the module"
         )
-        assert decision.alias == "glm"
         assert decision.slug == "z-ai/glm-5.2"
         assert decision.provider == "openrouter"
         assert decision.category == "software_engineering"
@@ -72,9 +71,9 @@ class TestRouting:
 
     async def test_empty_text_falls_back(self, router: Router) -> None:
         decision = await router.route("")
-        assert decision.alias == FALLBACK_ALIAS
+        assert decision.slug == DEFAULT_DESTINATION.model_slug
+        assert decision.provider == DEFAULT_DESTINATION.provider
         assert decision.category == "-"
-        assert decision.slug == "openai/gpt-5.6-luna"
 
     async def test_session_pinning(self, router: Router) -> None:
         d1 = await router.route(
@@ -82,9 +81,8 @@ class TestRouting:
         )
         # Same session: different text must reuse the pinned route.
         d2 = await router.route("now say hello", session_key="s1")
-        assert (d1.slug, d1.alias, d1.category, d1.provider) == (
+        assert (d1.slug, d1.category, d1.provider) == (
             d2.slug,
-            d2.alias,
             d2.category,
             d2.provider,
         )
@@ -107,81 +105,35 @@ class TestRouting:
         # Simulate a pin created 59 minutes ago (1 min before expiry).
         with r._lock:
             pin = r._pins["s-slide"]
-            r._pins["s-slide"] = (*pin[:6], _time.time() - 3540)
+            r._pins["s-slide"] = (*pin[:5], _time.time() - 3540)
         # A hit at minute 59 must refresh pinned_at to now, not keep the
         # original timestamp.
         d2 = await r.route("continue please", session_key="s-slide")
-        assert (d2.slug, d2.alias) == (d1.slug, d1.alias)
+        assert (d2.slug, d2.category) == (d1.slug, d1.category)
         with r._lock:
-            refreshed_at = r._pins["s-slide"][6]
+            refreshed_at = r._pins["s-slide"][5]
         assert _time.time() - refreshed_at < 5
 
     async def test_fixed_mode(self) -> None:
-        cfg = ProxyConfig(mode="fixed", fixed_alias="sonnet")
+        cfg = ProxyConfig(mode="fixed", fixed_slug="anthropic/claude-sonnet-5")
         r = Router(cfg)
         decision = await r.route("anything at all")
-        assert decision.alias == "sonnet"
         assert decision.slug == "anthropic/claude-sonnet-5"
         assert decision.provider == "openrouter"
         assert decision.category == "-"
 
-    async def test_alias_override(self) -> None:
-        cfg = ProxyConfig(aliases={"luna": {"model_slug": "custom/other-model"}})
-        r = Router(cfg)
-        decision = await r.route("")
-        assert decision.slug == "custom/other-model"
-
-    async def test_route_override_alias_form_honored(self, router: Router) -> None:
-        """Alias-form overrides written by /config/routing (the /ui default
-        path when both slots are built-in aliases) must actually change routing.
-
-        Regression: earlier _apply_route only honored the direct-destination
-        dict form, so choosing primary=sonnet/fallback=opus in the control
-        panel silently had no effect (requests still went to the default glm).
-        """
-        cfg = router._config
-        cfg.route_overrides = {
-            "software_engineering": {
-                "primary_alias": "sonnet",
-                "fallback_alias": "opus",
-            }
-        }
-        decision = await router.route(
-            "Fix the failing pytest suite in my Python repo and refactor the module"
+    async def test_fixed_mode_ollama(self) -> None:
+        cfg = ProxyConfig(
+            mode="fixed",
+            fixed_provider="ollama",
+            fixed_slug="qwen3.6:35b-a3b-q4_K_M",
         )
-        assert decision.alias == "sonnet"
-        assert decision.slug == "anthropic/claude-sonnet-5"
-        assert decision.provider == "openrouter"
+        r = Router(cfg)
+        decision = await r.route("anything at all")
+        assert decision.slug == "qwen3.6:35b-a3b-q4_K_M"
+        assert decision.provider == "ollama"
 
-    async def test_route_override_alias_form_escalates(self, router: Router) -> None:
-        """Alias-form override escalates to the configured fallback alias on
-        high/critical risk."""
-        cfg = router._config
-        cfg.route_overrides = {
-            "software_engineering": {
-                "primary_alias": "sonnet",
-                "fallback_alias": "fable",
-            }
-        }
-
-        def risky_classify(text: str) -> ClassifierResult:
-            return ClassifierResult(
-                task_class=TaskClass.SOFTWARE_ENGINEERING,
-                risk=RiskLevel.CRITICAL,
-                sensitivity=Sensitivity.INTERNAL,
-                confidence=0.95,
-            )
-
-        import smart_router_proxy.router as router_mod
-
-        router_mod.get_classifier = lambda: type(
-            "C", (), {"classify_to_result": lambda self, t: risky_classify(t)}
-        )()
-        decision = await router.route("some risky request")
-        assert decision.alias == "fable"
-        assert decision.slug == "anthropic/claude-fable-5"
-
-    async def test_route_override_direct_openrouter(self, router: Router) -> None:
+    async def test_route_override_openrouter(self, router: Router) -> None:
         cfg = router._config
         cfg.route_overrides = {
             "software_engineering": {
@@ -194,10 +146,9 @@ class TestRouting:
         )
         assert decision.slug == "org/frontier-model"
         assert decision.provider == "openrouter"
-        assert decision.alias == "custom"
         assert decision.category == "software_engineering"
 
-    async def test_route_override_direct_ollama(self, router: Router) -> None:
+    async def test_route_override_ollama(self, router: Router) -> None:
         cfg = router._config
         cfg.route_overrides = {
             "software_engineering": {
@@ -210,9 +161,8 @@ class TestRouting:
         )
         assert decision.slug == "qwen3.6:35b-a3b-q4_K_M"
         assert decision.provider == "ollama"
-        assert decision.alias == "custom"
 
-    async def test_route_override_direct_escalates_to_fallback(
+    async def test_route_override_escalates_to_fallback(
         self, router: Router
     ) -> None:
         cfg = router._config

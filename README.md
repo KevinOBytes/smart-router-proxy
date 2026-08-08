@@ -120,14 +120,21 @@ Each request is classified into one of 8 task types:
 
 | Task Class | Primary Model | Escalation Model |
 |---|---|---|
-| `structured_simple` | luna (GPT-5.6) | glm (GLM-5.2) |
-| `agentic_execution` | deepseek_flash | sol (GPT-5.6) |
-| `software_engineering` | glm (GLM-5.2) | opus (Claude-5) |
-| `security_engineering` | sol (GPT-5.6) | fable (Claude-5) |
-| `knowledge_reasoning` | glm (GLM-5.2) | kimi_k3 |
-| `writing_communication` | sonnet (Claude-5) | opus (Claude-5) |
-| `computer_use` | sonnet (Claude-5) | opus (Claude-5) |
-| `visual_frontend` | kimi_k3 | opus (Claude-5) |
+| `structured_simple` | GPT-5.6 luna | GLM-5.2 |
+| `agentic_execution` | DeepSeek V4 Flash | GPT-5.6 sol |
+| `software_engineering` | GLM-5.2 | Claude Opus 5 |
+| `security_engineering` | GPT-5.6 sol | Claude Fable 5 |
+| `knowledge_reasoning` | GLM-5.2 | Kimi K3 |
+| `writing_communication` | Claude Sonnet 5 | Claude Opus 5 |
+| `computer_use` | Claude Sonnet 5 | Claude Opus 5 |
+| `visual_frontend` | Kimi K3 | Claude Opus 5 |
+
+Every destination is a **concrete (provider, model)** pair — there is no alias
+indirection layer. The control panel's routing matrix lets you pin any
+OpenRouter or installed Ollama model as a task class's primary or escalation
+destination, and requests are dispatched *directly* to that provider (an
+Ollama destination is sent to the loopback Ollama endpoint, never to
+OpenRouter).
 
 ### Session Pinning
 
@@ -158,9 +165,10 @@ runtime, or public service. The panel shows:
 
 - live health for the proxy, classifier, OpenRouter upstream, and Ollama;
 - the eight task-class routing rows with searchable primary/fallback pickers
-  (OpenRouter models first, installed Ollama models selectable per route);
+  (OpenRouter models first, installed Ollama models selectable per route —
+  destinations are dispatched directly to their provider);
 - a classifier test box (classification only — never calls a provider);
-- behavior settings (mode, fixed alias, response annotation, pin TTL);
+- behavior settings (mode, fixed provider/model, response annotation, pin TTL);
 - upstream endpoint settings (secret values are never displayed — only
   whether the named env var is present in the process);
 - session pins (content-free records) with clear-one / clear-all.
@@ -187,8 +195,9 @@ classifier:
   model_path: ~/.smart-router-proxy/classifier-model
   confidence_threshold: 0.45
 
-mode: active  # or "fixed" to always use one model
-fixed_alias: "luna"
+mode: active  # or "fixed" to always use one concrete provider/model
+fixed_provider: "openrouter"  # "openrouter" or "ollama"
+fixed_slug: "openai/gpt-5.6-luna"
 
 session_ttl_seconds: 3600
 ```
@@ -251,7 +260,9 @@ flowchart LR
     H[Hermes Agent] -- "model: smart-router" --> P[Smart Router Proxy<br/>127.0.0.1:8199]
     P --> B[BERT classifier<br/>distilbert + MLX]
     B -- "TaskClass + confidence" --> R[Route Policy]
-    R -- "alias → model slug" --> T[OpenRouter transport]
+    R -- "concrete (provider, model)" --> D{Dispatch by provider}
+    D -- "openrouter" --> T[OpenRouter transport]
+    D -- "ollama" --> OL[Ollama loopback]
     T -- "chat completion" --> O["OpenRouter<br/>(model from task class table)"]
     T -- "session pinned" --> S[(SQLite pin store)]
     O -- "response" --> H
@@ -259,9 +270,11 @@ flowchart LR
 
 1. Hermes sends each turn to the proxy with `model=smart-router`.
 2. The BERT classifier tags the task class (and risk/sensitivity).
-3. The route policy maps class → alias → concrete OpenRouter slug.
-4. The transport proxies the call; the choice is pinned per session (SQLite)
-   so active tool loops don't re-route and blow the prompt cache.
+3. The route policy resolves the class → concrete (provider, model) destination.
+4. The proxy dispatches directly to that provider: OpenRouter destinations use
+   the proxy's own key; Ollama destinations hit the loopback Ollama endpoint.
+   The choice is pinned per session (SQLite) so active tool loops don't
+   re-route and blow the prompt cache.
 
 ### Turn it back off
 
@@ -286,16 +299,17 @@ where generic traffic should land.
 Before routing real traffic:
 
 1. **Watch what's being routed** — set `annotate_response: true` in
-   `config.yaml` so every reply carries a `[task_class :: model (alias)]`
-   tag, and poll the ledger:
+   `config.yaml` so every reply carries a `[task_class :: model]` tag, and
+   poll the ledger:
    ```bash
    curl http://127.0.0.1:8199/v1/stats
    ```
 2. **Keep spend visible** — the control panel (http://127.0.0.1:8199/ui)
    shows live routing; check it periodically.
-3. **Consider `mode: fixed`** (`fixed_alias: luna`) if you want a cheap,
-   predictable default while you validate the classifier, instead of the
-   expense-prone active table.
+3. **Consider `mode: fixed`** (`fixed_provider: openrouter`,
+   `fixed_slug: openai/gpt-5.6-luna`) if you want a cheap, predictable
+   default while you validate the classifier, instead of the expense-prone
+   active table.
 4. **Know the fallback table** — `security_engineering` escalates to
    `fable`, `software_engineering`/`writing`/`computer_use` to `opus`.
    These are the premium Claude-5 models. They are appropriate for the
@@ -317,7 +331,7 @@ tag to each assistant reply so callers can see which task class and model
 answered:
 
 ```
-[software_engineering :: z-ai/glm-5.2 (glm)]
+[software_engineering :: z-ai/glm-5.2]
 <assistant content follows>
 ```
 

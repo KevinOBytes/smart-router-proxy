@@ -29,9 +29,13 @@ upstream:
 # passes through to the upstream untouched.
 virtual_model: smart-router
 
-# mode: active (classify + route) or fixed (always fixed_alias)
+# mode: active (classify + route) or fixed (always route to fixed_slug).
 mode: active
-fixed_alias: luna
+
+# Fixed mode routes every request to this concrete destination:
+# provider (openrouter | ollama) + model slug/name.
+fixed_provider: openrouter
+fixed_slug: openai/gpt-5.6-luna
 
 # Session pin TTL — requests with the same `user` field or X-Session-Id
 # header keep their routed model this long.
@@ -42,11 +46,13 @@ session_ttl_seconds: 3600
 # never prompt or completion content.
 store_path: ~/.smart-router-proxy/state.db
 
-# Prepend a visible routing tag ([category :: model (alias)]) to assistant
-# content. Off by default — set true to see the classification + model per reply.
+# Prepend a visible routing tag ([category :: model]) to assistant content.
+# Off by default — set true to see the classification + model per reply.
 annotate_response: false
 
-# Optional alias -> slug overrides (defaults come from hermes-smart-router)
-aliases: {}
-#  luna:
-#    model_slug: openai/gpt-5.6-luna
+# Per-task-class concrete destination overrides (managed by the control
+# panel). Each entry maps a task class to primary/fallback destination:
+#   software_engineering:
+#     primary: {provider: openrouter, model: z-ai/glm-5.2}
+#     fallback: {provider: openrouter, model: anthropic/claude-opus-5}
+route_overrides: {}

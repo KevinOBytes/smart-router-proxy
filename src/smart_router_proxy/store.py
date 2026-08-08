@@ -19,7 +19,6 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
     ts REAL NOT NULL,
     session_hash TEXT NOT NULL,
-    alias TEXT NOT NULL,
     model TEXT NOT NULL,
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -33,7 +32,6 @@ CREATE INDEX IF NOT EXISTS idx_usage_model ON usage (model);
 CREATE TABLE IF NOT EXISTS pins (
     key_hash TEXT PRIMARY KEY,
     slug TEXT NOT NULL,
-    alias TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT '-',
     pinned_at REAL NOT NULL,
     provider TEXT NOT NULL DEFAULT 'openrouter',
@@ -101,6 +99,62 @@ class Store:
             self._db.execute("ALTER TABLE pins ADD COLUMN fallback_slug TEXT")
             self._db.execute("ALTER TABLE pins ADD COLUMN fallback_provider TEXT")
             self._db.commit()
+        # Migration: the alias indirection layer was removed. Drop the now
+        # unused alias column from any table that still carries it.
+        self._drop_alias_column("usage")
+        self._drop_alias_column("pins")
+
+    def _drop_alias_column(self, table: str) -> None:
+        """Rebuild ``table`` without its ``alias`` column (SQLite has no
+        native DROP COLUMN before 3.35; rebuild instead)."""
+        cols = {
+            r[1] for r in self._db.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "alias" not in cols:
+            return
+        if table == "usage":
+            script = """
+CREATE TABLE usage_new (
+    ts REAL NOT NULL,
+    session_hash TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0.0,
+    latency_ms REAL NOT NULL DEFAULT 0.0,
+    status INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO usage_new (ts, session_hash, model, prompt_tokens, completion_tokens,
+    cached_tokens, cost, latency_ms, status)
+    SELECT ts, session_hash, model, prompt_tokens, completion_tokens,
+    cached_tokens, cost, latency_ms, status FROM usage;
+DROP TABLE usage;
+ALTER TABLE usage_new RENAME TO usage;
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage (ts);
+CREATE INDEX IF NOT EXISTS idx_usage_model ON usage (model);
+"""
+        else:  # pins
+            script = """
+CREATE TABLE pins_new (
+    key_hash TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '-',
+    pinned_at REAL NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'openrouter',
+    fallback_slug TEXT,
+    fallback_provider TEXT
+);
+INSERT INTO pins_new (key_hash, slug, category, pinned_at, provider,
+    fallback_slug, fallback_provider)
+    SELECT key_hash, slug, category, pinned_at, provider,
+    fallback_slug, fallback_provider FROM pins;
+DROP TABLE pins;
+ALTER TABLE pins_new RENAME TO pins;
+"""
+        with self._lock:
+            self._db.executescript(script)
+            self._db.commit()
 
     # ── Usage ledger ─────────────────────────────────────────────────
 
@@ -108,7 +162,6 @@ class Store:
         self,
         *,
         session_hash: str,
-        alias: str,
         model: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
@@ -119,13 +172,12 @@ class Store:
     ) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT INTO usage (ts, session_hash, alias, model, prompt_tokens,"
+                "INSERT INTO usage (ts, session_hash, model, prompt_tokens,"
                 " completion_tokens, cached_tokens, cost, latency_ms, status)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     session_hash,
-                    alias,
                     model,
                     prompt_tokens,
                     completion_tokens,
@@ -200,10 +252,10 @@ class Store:
 
     def get_pin(
         self, key_hash: str
-    ) -> tuple[str, str, str, str, str | None, str | None, float] | None:
+    ) -> tuple[str, str, str, str | None, str | None, float] | None:
         with self._lock:
             row = self._db.execute(
-                "SELECT slug, alias, category, provider, fallback_slug,"
+                "SELECT slug, category, provider, fallback_slug,"
                 " fallback_provider, pinned_at FROM pins WHERE key_hash = ?",
                 (key_hash,),
             ).fetchone()
@@ -213,17 +265,15 @@ class Store:
             str(row[0]),
             str(row[1]),
             str(row[2]),
-            str(row[3]),
+            str(row[3]) if row[3] is not None else None,
             str(row[4]) if row[4] is not None else None,
-            str(row[5]) if row[5] is not None else None,
-            float(row[6]),
+            float(row[5]),
         )
 
     def save_pin(
         self,
         key_hash: str,
         slug: str,
-        alias: str,
         category: str,
         pinned_at: float,
         provider: str = "openrouter",
@@ -232,13 +282,12 @@ class Store:
     ) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO pins (key_hash, slug, alias, category,"
+                "INSERT OR REPLACE INTO pins (key_hash, slug, category,"
                 " pinned_at, provider, fallback_slug, fallback_provider)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     key_hash,
                     slug,
-                    alias,
                     category,
                     pinned_at,
                     provider,
@@ -259,16 +308,15 @@ class Store:
         """Content-free pin records for the admin panel (no session content)."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT key_hash, slug, alias, category, pinned_at FROM pins"
+                "SELECT key_hash, slug, category, pinned_at FROM pins"
                 " ORDER BY pinned_at DESC"
             ).fetchall()
         return [
             {
                 "id": str(r[0]),
                 "slug": str(r[1]),
-                "alias": str(r[2]),
-                "category": str(r[3]),
-                "pinned_at": float(r[4]),
+                "category": str(r[2]),
+                "pinned_at": float(r[3]),
             }
             for r in rows
         ]
