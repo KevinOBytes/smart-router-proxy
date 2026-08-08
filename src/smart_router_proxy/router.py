@@ -237,6 +237,18 @@ class Router:
                     category=category,
                     provider=str(primary.get("provider", "openrouter")),
                 )
+        # Alias-form override (written by /config/routing and the /ui when
+        # both slots are built-in aliases): honor the configured primary
+        # alias (and escalate to the configured fallback alias on
+        # high/critical risk), falling back to the built-in defaults for
+        # any slot the override leaves unset.
+        if override and not isinstance(override.get("primary"), dict):
+            default_primary, default_fallback = DEFAULT_ROUTE_TABLE[result.task_class]
+            primary_alias = str(override.get("primary_alias") or default_primary)
+            fallback_alias = str(override.get("fallback_alias") or default_fallback)
+            if result.risk.value in ("high", "critical"):
+                return self._decision_for_alias(fallback_alias, category)
+            return self._decision_for_alias(primary_alias, category)
 
         route = DEFAULT_ROUTE_TABLE.get(result.task_class)
         if route is None:

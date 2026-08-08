@@ -131,6 +131,56 @@ class TestRouting:
         decision = await r.route("")
         assert decision.slug == "custom/other-model"
 
+    async def test_route_override_alias_form_honored(self, router: Router) -> None:
+        """Alias-form overrides written by /config/routing (the /ui default
+        path when both slots are built-in aliases) must actually change routing.
+
+        Regression: earlier _apply_route only honored the direct-destination
+        dict form, so choosing primary=sonnet/fallback=opus in the control
+        panel silently had no effect (requests still went to the default glm).
+        """
+        cfg = router._config
+        cfg.route_overrides = {
+            "software_engineering": {
+                "primary_alias": "sonnet",
+                "fallback_alias": "opus",
+            }
+        }
+        decision = await router.route(
+            "Fix the failing pytest suite in my Python repo and refactor the module"
+        )
+        assert decision.alias == "sonnet"
+        assert decision.slug == "anthropic/claude-sonnet-5"
+        assert decision.provider == "openrouter"
+
+    async def test_route_override_alias_form_escalates(self, router: Router) -> None:
+        """Alias-form override escalates to the configured fallback alias on
+        high/critical risk."""
+        cfg = router._config
+        cfg.route_overrides = {
+            "software_engineering": {
+                "primary_alias": "sonnet",
+                "fallback_alias": "fable",
+            }
+        }
+
+        def risky_classify(text: str) -> ClassifierResult:
+            return ClassifierResult(
+                task_class=TaskClass.SOFTWARE_ENGINEERING,
+                risk=RiskLevel.CRITICAL,
+                sensitivity=Sensitivity.INTERNAL,
+                confidence=0.95,
+            )
+
+        import smart_router_proxy.router as router_mod
+
+        router_mod.get_classifier = lambda: type(
+            "C", (), {"classify_to_result": lambda self, t: risky_classify(t)}
+        )()
+        decision = await router.route("some risky request")
+        assert decision.alias == "fable"
+        assert decision.slug == "anthropic/claude-fable-5"
+
     async def test_route_override_direct_openrouter(self, router: Router) -> None:
         cfg = router._config
         cfg.route_overrides = {
