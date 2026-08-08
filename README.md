@@ -211,6 +211,101 @@ response = client.chat.completions.create(
 )
 ```
 
+## Using With Hermes Agent
+
+Hermes can route its model traffic through this proxy so the classifier
+picks which OpenRouter model handles each task. This is the same routing
+logic as the
+[hermes-smart-router](https://github.com/KevinOBytes/hermes-smart-router)
+plugin, but driven by the standalone server.
+
+### Wiring (`~/.hermes/config.yaml`)
+
+Add a provider pointing at the proxy, and select it:
+
+```yaml
+model:
+  default: smart-router            # route through the classifier
+  provider: smart-router-proxy
+
+providers:
+  smart-router-proxy:
+    name: Smart Router Proxy
+    api: http://127.0.0.1:8199/v1
+    key_env: OPENROUTER_API_KEY
+    transport: openai_chat
+```
+
+- `run.sh` pulls `OPENROUTER_API_KEY` from `~/.hermes/.env`, so make sure
+  it's set there.
+- `model.default: smart-router` is the *virtual model* name the proxy
+  intercepts. Any request with that model name is classified and routed.
+- Because Hermes sends real agent sessions through it (tool loops, long
+  threads), every turn re-classifies and is billed to whatever OpenRouter
+  model the table selected. This is **not** free passthrough.
+
+### How a request flows
+
+```mermaid
+flowchart LR
+    H[Hermes Agent] -- "model: smart-router" --> P[Smart Router Proxy<br/>127.0.0.1:8199]
+    P --> B[BERT classifier<br/>distilbert + MLX]
+    B -- "TaskClass + confidence" --> R[Route Policy]
+    R -- "alias → model slug" --> T[OpenRouter transport]
+    T -- "chat completion" --> O["OpenRouter<br/>(model from task class table)"]
+    T -- "session pinned" --> S[(SQLite pin store)]
+    O -- "response" --> H
+```
+
+1. Hermes sends each turn to the proxy with `model=smart-router`.
+2. The BERT classifier tags the task class (and risk/sensitivity).
+3. The route policy maps class → alias → concrete OpenRouter slug.
+4. The transport proxies the call; the choice is pinned per session (SQLite)
+   so active tool loops don't re-route and blow the prompt cache.
+
+### Turn it back off
+
+Just point `model.default` back at a concrete model and drop the provider
+block (or leave it but don't select it):
+
+```yaml
+model:
+  default: deepseek/deepseek-v4-flash-0731   # direct — bypasses the proxy
+  provider: openrouter
+```
+
+### ⚠️ Cost safety (read before leaving it on)
+
+The routing table sends *every* request in a class to its selected model,
+and a single agent session can rack up hundreds of calls. On this machine
+an unmonitored deployment ran **1,398 calls ($133)** to the
+`security_engineering` fallback (`anthropic/claude-fable-5`) before it was
+spotted. `fable` is the escalation model — it is expensive and is *not*
+where generic traffic should land.
+
+Before routing real traffic:
+
+1. **Watch what's being routed** — set `annotate_response: true` in
+   `config.yaml` so every reply carries a `[task_class :: model (alias)]`
+   tag, and poll the ledger:
+   ```bash
+   curl http://127.0.0.1:8199/v1/stats
+   ```
+2. **Keep spend visible** — the control panel (http://127.0.0.1:8199/ui)
+   shows live routing; check it periodically.
+3. **Consider `mode: fixed`** (`fixed_alias: luna`) if you want a cheap,
+   predictable default while you validate the classifier, instead of the
+   expense-prone active table.
+4. **Know the fallback table** — `security_engineering` escalates to
+   `fable`, `software_engineering`/`writing`/`computer_use` to `opus`.
+   These are the premium Claude-5 models. They are appropriate for the
+   task but they are the cost drivers.
+5. **Shut it off when not in use** — `./install.sh uninstall` removes the
+   LaunchAgent and leaves no process or port behind.
+
+If you do not need per-task routing, don't enable it: the direct
+OpenRouter path (default Hermes config) is simpler and cheaper.
+
 ## Client Auth
 
 Set `SMART_ROUTER_PROXY_TOKEN` to require a bearer token from clients.
