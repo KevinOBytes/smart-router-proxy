@@ -159,8 +159,9 @@ ensure_config() {
 
 check_api_key() {
   local key_env key
-  key_env="$(read_manifest_field 2>/dev/null || echo OPENROUTER_API_KEY)"
-  # Read from config.yaml upstream.api_key_env if present
+  # Read from config.yaml upstream.api_key_env if present. Do not call
+  # read_manifest_field here: it requires a field argument and is unrelated
+  # to runtime credentials.
   key_env="$("$VENV/bin/python3" -c '
 from smart_router_proxy.config import load_config
 print(load_config("config.yaml").upstream.api_key_env)
